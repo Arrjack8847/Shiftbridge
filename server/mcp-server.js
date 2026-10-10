@@ -3,20 +3,27 @@
 /**
  * server/mcp-server.js — ShiftBridge MCP Server (Silent AI agent)
  *
- * Exposes 8 tools via stdio transport for WorkBuddy Desktop to call:
- *   1. get_recent_messages  — read recent chat messages from a workspace
- *   2. get_active_tasks     — list tasks with status, assignee, protected flags
- *   3. get_workspace_rules   — show permitted/locked categories per workspace
- *   4. list_tasks           — list all tasks in a workspace (alias of get_active_tasks)
- *   5. propose_task          — create a task proposal for manager review
- *   6. propose_completion    — review a completion claim and create a proposal
- *   7. refuse_protected_work — create a refusal proposal for protected work
- *   8. get_audit_trail       — get the audit log for a workspace
+ * Exposes 9 tools via stdio transport for WorkBuddy Desktop to call:
+ *   1. get_recent_messages     — read recent chat messages from a workspace
+ *   2. get_active_tasks        — list tasks with status, assignee, protected flags
+ *   3. get_workspace_rules     — show permitted/locked categories per workspace
+ *   4. list_tasks              — list all tasks in a workspace (alias of get_active_tasks)
+ *   5. propose_task            — create a task proposal for manager review
+ *   6. propose_completion      — review a completion claim and create a proposal
+ *   7. refuse_protected_work   — create a refusal proposal for protected work
+ *   8. get_audit_trail         — get the audit log for a workspace
+ *   9. propose_chat_completion — process a chat-derived completion claim
  *
  * CRITICAL SAFETY: Protected tasks (repairs, purchases, safety) remain in
  * 'review' status when a manager approves the AI completion_review, UNLESS
  * the manager provides explicit qualified verification evidence. A demo
  * manager role alone is NOT qualified verification.
+ *
+ * CHAT COMPLETION (Phase 4): The AI can detect completion claims in employee
+ * chat messages and submit them through propose_chat_completion. The server
+ * validates the message, task, and employee identity, prevents duplicate
+ * processing, applies the workspace verification policy, and records the claim
+ * with linked evidence. The AI NEVER posts to the shared chat.
  *
  * The server communicates with the ShiftBridge REST API at
  * http://localhost:3000/api (configurable via SHIFTBRIDGE_API env var).
@@ -186,6 +193,26 @@ const TOOLS = [
         workspace: { type: 'string', description: 'Workspace ID' },
       },
       required: ['workspace'],
+    },
+  },
+  {
+    name: 'propose_chat_completion',
+    description: 'Process a chat-derived completion claim. The AI detects that an employee has reported task completion in a chat message and submits the claim for processing. The server validates the message, task, and employee identity, prevents duplicate processing, and applies the workspace verification policy. Routine tasks are marked done (self-attestation, not independent proof). Protected tasks (repairs, purchases, safety) are moved to review status and require qualified human verification. The AI never posts to the shared chat. Requires a real source message ID, task ID, and reporting employee.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace: { type: 'string', description: 'Workspace ID' },
+        taskId: { type: 'string', description: 'ID of the task being reported as complete' },
+        messageId: { type: 'string', description: 'ID of the chat message containing the completion claim' },
+        reportingEmployee: { type: 'string', description: 'Person ID of the employee reporting completion (must match the task assignee)' },
+        claimType: {
+          type: 'string',
+          enum: ['completion', 'progress', 'ambiguous'],
+          description: 'Type of claim detected: "completion" (clear completion), "progress" (progress-only, not a completion), "ambiguous" (unclear if completion)',
+          default: 'completion',
+        },
+      },
+      required: ['workspace', 'taskId', 'messageId', 'reportingEmployee'],
     },
   },
 ];
@@ -380,6 +407,64 @@ async function get_audit_trail(args) {
   return { summary, audit };
 }
 
+async function propose_chat_completion(args) {
+  const { workspace, taskId, messageId, reportingEmployee, claimType = 'completion' } = args;
+
+  // Validate required parameters.
+  if (!workspace) return { error: 'workspace is required' };
+  if (!taskId) return { error: 'taskId is required' };
+  if (!messageId) return { error: 'messageId is required — a real source message ID is needed' };
+  if (!reportingEmployee) return { error: 'reportingEmployee is required' };
+
+  // Call the backend API to process the chat-derived completion claim.
+  try {
+    const result = await apiRequest('POST', `/workspaces/${workspace}/chat-completion`, {
+      taskId,
+      messageId,
+      reportingEmployee,
+      claimType,
+    });
+
+    // Build a summary for the AI.
+    const protected_ = result.protectedTask ? ' [PROTECTED]' : '';
+    const summary = result.protectedTask
+      ? `Chat completion claim processed. Task "${result.task?.name}" moved to REVIEW — qualified verification required.${protected_}\n` +
+        `  Claim ID: ${result.claim?.id}\n` +
+        `  Verification applied: ${result.verificationApplied}\n` +
+        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+        `  CRITICAL: This is an employee self-attestation, NOT independent proof. Qualified human verification required.`
+      : `Chat completion claim processed. Task "${result.task?.name}" marked DONE (self-attestation).${protected_}\n` +
+        `  Claim ID: ${result.claim?.id}\n` +
+        `  Verification applied: ${result.verificationApplied}\n` +
+        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+        `  NOTE: This is a self-reported claim, NOT independent proof of completion.`;
+
+    return {
+      message: result.message,
+      summary,
+      claim: result.claim,
+      task: result.task,
+      proposal: result.proposal,
+      verificationApplied: result.verificationApplied,
+      finalTaskStatus: result.finalTaskStatus,
+      protectedTask: result.protectedTask,
+      sourceMessage: result.sourceMessage,
+    };
+  } catch (err) {
+    // The API returns structured error responses for known rejection cases.
+    // Parse them to provide clear diagnostics.
+    const errorParts = (err.message || '').split('|');
+    return {
+      error: err.message,
+      taskId,
+      messageId,
+      reportingEmployee,
+      workspace,
+      diagnostic: 'The completion claim could not be processed. Common causes: wrong employee (reporting employee does not match task assignee), duplicate (message already processed for this task), message not found (messageId does not exist in this workspace), or task not found (taskId does not exist in this workspace).',
+    };
+  }
+}
+
 const TOOL_HANDLERS = {
   get_recent_messages,
   get_active_tasks,
@@ -389,6 +474,7 @@ const TOOL_HANDLERS = {
   propose_completion,
   refuse_protected_work,
   get_audit_trail,
+  propose_chat_completion,
 };
 
 // ── MCP Protocol (official @modelcontextprotocol/sdk) ────────────
@@ -433,4 +519,4 @@ await server.connect(transport);
 
 process.stderr.write('ShiftBridge MCP Server started (official SDK, stdio transport)\n');
 process.stderr.write(`API base: ${API_BASE}\n`);
-process.stderr.write(`Tools: ${TOOLS.map((t) => t.name).join(', ')}\n`);
+process.stderr.write(`Tools (${TOOLS.length}): ${TOOLS.map((t) => t.name).join(', ')}\n`);

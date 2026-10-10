@@ -80,6 +80,15 @@ const api = {
   // ── Reset ─────────────────────────────────────────────────────────
   reset: () => request('POST', '/reset'),
 
+  // ── Chat-Derived Completion Claims (Phase 4) ──────────────────────
+  processChatCompletion: (ws, data) => request('POST', `/workspaces/${ws}/chat-completion`, data),
+  getCompletionClaims: (ws) => request('GET', `/workspaces/${ws}/completion-claims`),
+  getTaskCompletionClaims: (taskId) => request('GET', `/tasks/${taskId}/completion-claims`),
+
+  // ── Silent AI Analysis Monitoring (Phase 5) ────────────────────────
+  getAIStatus: (ws) => request('GET', `/workspaces/${ws}/ai-status`),
+  logAIAnalysis: (ws, data) => request('POST', `/workspaces/${ws}/ai-log`, data),
+
   // ── SSE ───────────────────────────────────────────────────────────
   /**
    * Open an SSE connection for a workspace. Calls onEvent(payload) for each update.

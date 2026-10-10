@@ -41,3 +41,8 @@
 .proposal-actions .btn{flex:1}
 .proposal-reviewed-note{padding-top:6px;border-top:1px solid var(--line)}
 .proposal-reviewed-note small{color:var(--muted);font-size:11px}
+
+/* ── Silent AI Monitoring (Phase 5) ────────────────────────────── */
+.ai-monitor-card{border-left:3px solid var(--teal2);margin-bottom:20px}
+.ai-monitor-card .metric-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media(max-width:700px){.ai-monitor-card .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

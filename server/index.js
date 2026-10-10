@@ -30,6 +30,8 @@ import {
   mapRule,
   mapAudit,
   mapProposal,
+  mapCompletionClaim,
+  mapAIAnalysisLog,
 } from './db.js';
 import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
@@ -556,7 +558,7 @@ app.post('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) =
     reasoning = '', confidence = 'medium', proposedData = null,
   } = req.body;
 
-  const validTypes = ['task_proposal', 'completion_review', 'refusal'];
+  const validTypes = ['task_proposal', 'completion_review', 'refusal', 'chat_completion_claim'];
   if (!validTypes.includes(type)) return res.status(400).json({ error: 'invalid proposal type' });
   const trimmedSummary = String(summary || '').trim();
   if (!trimmedSummary) return res.status(400).json({ error: 'summary is required' });
@@ -670,6 +672,18 @@ app.put('/api/proposals/:id/review', (req, res) => {
             );
           }
         }
+      } else if (row.type === 'chat_completion_claim' && row.entity_id) {
+        // Chat-derived completion claim: when approved, acknowledge.
+        // When rejected, reopen the task to 'todo' status.
+        const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get(row.entity_id);
+        if (taskRow) {
+          d.prepare('UPDATE tasks SET status = ?, completion = ?, updated_at = ? WHERE id = ?').run(
+            'todo', '', ts, row.entity_id,
+          );
+          d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+            `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', row.entity_id, reviewer, `done → todo (chat completion claim rejected by ${reviewer})`, ts,
+          );
+        }
       }
       // For 'refusal' type: approval means the manager acknowledges the refusal.
       // The task stays in its current status (e.g., 'review') — no automatic change.
@@ -696,6 +710,373 @@ app.put('/api/proposals/:id/review', (req, res) => {
   res.json(mapProposal(updated));
 });
 
+// ── Chat-Derived Completion Claims (Phase 4) ────────────────────────
+//
+// The Silent AI detects completion claims in employee chat messages and
+// submits them through this endpoint. The server:
+//   1. Validates the source message exists in the workspace.
+//   2. Validates the task exists in the same workspace.
+//   3. Checks the reporting employee matches the task assignee.
+//   4. Prevents duplicate processing (unique task_id + message_id).
+//   5. Applies the workspace verification policy:
+//      - Routine (self-report permitted) → task marked 'done', claim recorded
+//        as self-attestation (NOT independent proof).
+//      - Protected (repairs/purchases/safety) → task moved to 'review',
+//        requires qualified human verification before 'done'.
+//   6. Records the claim in completion_claims table.
+//   7. Creates an ai_proposal for manager visibility.
+//   8. Logs to audit trail.
+//   9. Never posts to the shared chat.
+
+/** GET /api/workspaces/:workspace/completion-claims — list all claims in a workspace. */
+app.get('/api/workspaces/:workspace/completion-claims', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const rows = d.prepare('SELECT * FROM completion_claims WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
+  res.json({ claims: rows.map(mapCompletionClaim), revision: currentRevision() });
+});
+
+/** GET /api/tasks/:id/completion-claims — list claims for a specific task. */
+app.get('/api/tasks/:id/completion-claims', (req, res) => {
+  const d = getDB();
+  const rows = d.prepare('SELECT * FROM completion_claims WHERE task_id = ? ORDER BY created_at DESC').all(req.params.id);
+  res.json({ claims: rows.map(mapCompletionClaim) });
+});
+
+/** POST /api/workspaces/:workspace/chat-completion — process a chat-derived completion claim. */
+app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, res) => {
+  const { taskId, messageId, reportingEmployee, claimType = 'completion' } = req.body;
+
+  // ── Validate required fields ────────────────────────────────────
+  if (!taskId) return res.status(400).json({ error: 'taskId is required' });
+  if (!messageId) return res.status(400).json({ error: 'messageId is required' });
+  if (!reportingEmployee) return res.status(400).json({ error: 'reportingEmployee is required' });
+
+  const d = getDB();
+  const ws = req.workspaceId;
+
+  // ── 1. Validate source message exists in this workspace ─────────
+  const msgRow = d.prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?').get(messageId, ws);
+  if (!msgRow) {
+    return res.status(404).json({
+      error: 'Source message not found in this workspace',
+      messageId,
+      workspace: ws,
+    });
+  }
+
+  // ── 2. Validate task exists in this workspace ───────────────────
+  const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?').get(taskId, ws);
+  if (!taskRow) {
+    return res.status(404).json({
+      error: 'Task not found in this workspace',
+      taskId,
+      workspace: ws,
+    });
+  }
+
+  // ── 3. Check reporting employee matches task assignee ───────────
+  if (taskRow.assignee !== reportingEmployee) {
+    // Record the rejected claim attempt for audit purposes.
+    const claimId = `cc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const ts = Date.now();
+    d.prepare(
+      `INSERT OR IGNORE INTO completion_claims (id, workspace_id, task_id, message_id, reporting_employee, claim_text, claim_type, status, verification_applied, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'rejected', 'none', ?)`,
+    ).run(claimId, ws, taskId, messageId, reportingEmployee, msgRow.body, claimType, ts);
+
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ws, 'chat_completion_rejected', 'task', taskId, 'silent-ai',
+      `Rejected: ${reportingEmployee} is not the assignee of task ${taskId} (assignee: ${taskRow.assignee || 'unassigned'})`, ts,
+    );
+    bumpRevision();
+
+    return res.status(403).json({
+      error: 'Wrong employee: the reporting employee does not match the task assignee',
+      taskId,
+      taskAssignee: taskRow.assignee,
+      reportingEmployee,
+      messageId,
+    });
+  }
+
+  // ── 4. Prevent duplicate processing ─────────────────────────────
+  const existing = d.prepare('SELECT * FROM completion_claims WHERE task_id = ? AND message_id = ?').get(taskId, messageId);
+  if (existing) {
+    return res.status(409).json({
+      error: 'Duplicate: this message has already been processed as a completion claim for this task',
+      existingClaim: mapCompletionClaim(existing),
+      taskId,
+      messageId,
+    });
+  }
+
+  // ── 5. Apply workspace verification policy ──────────────────────
+  const protectedTask = isProtectedTask(taskRow);
+  const taskCategory = taskRow.category;
+  const taskVerification = taskRow.verification;
+  const claimText = msgRow.body;
+  const ts = Date.now();
+  const claimId = `cc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // For progress-only messages, the task status does NOT change.
+  // The claim is recorded for audit purposes but the task remains as-is.
+  if (claimType === 'progress') {
+    const tx2 = d.transaction(() => {
+      d.prepare(
+        `INSERT OR IGNORE INTO completion_claims (id, workspace_id, task_id, message_id, reporting_employee, claim_text, claim_type, status, verification_applied, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'recorded', 'none', ?)`,
+      ).run(claimId, ws, taskId, messageId, reportingEmployee, claimText, claimType, ts);
+
+      d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ws, 'chat_progress_report', 'task', taskId, 'silent-ai',
+        `Progress report from chat: ${reportingEmployee} reported "${claimText.slice(0, 100)}" (msg ${messageId}). Task status unchanged.`, ts,
+      );
+      bumpRevision();
+    });
+    tx2();
+
+    notifySSE(ws, { type: 'proposal', action: 'created', id: claimId });
+
+    const task2 = d.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+    const claim2 = d.prepare('SELECT * FROM completion_claims WHERE id = ?').get(claimId);
+    return res.status(201).json({
+      message: 'Progress report recorded — task status unchanged',
+      claim: mapCompletionClaim(claim2),
+      task: mapTask(task2),
+      verificationApplied: 'none',
+      finalTaskStatus: task2.status,
+      protectedTask,
+      sourceMessage: { id: msgRow.id, user: msgRow.user_id, body: msgRow.body },
+    });
+  }
+
+  // Determine the final task status and verification applied.
+  let finalTaskStatus;
+  let verificationApplied;
+  let claimStatus;
+  let proposalType;
+  let proposalSummary;
+  let proposalReasoning;
+  let proposalConfidence;
+
+  if (protectedTask) {
+    // Protected task (repairs, purchases, safety, or verification=qualified):
+    // Move to 'review' — requires qualified human verification.
+    // AI cannot mark this done. Manager approval alone is NOT sufficient.
+    finalTaskStatus = 'review';
+    verificationApplied = 'qualified';
+    claimStatus = 'pending_review';
+    proposalType = 'completion_review';
+    proposalSummary = `Chat-derived completion claim for "${taskRow.name}" — requires qualified verification`;
+    proposalReasoning =
+      `Employee ${reportingEmployee} reported task completion in chat message ${messageId}: ` +
+      `"${claimText}". This task is in the "${taskCategory}" category with verification="${taskVerification}", ` +
+      `which requires qualified human verification. The task has been moved to 'review' status. ` +
+      `The chat message is recorded as evidence of the employee's self-attestation, NOT as independent proof ` +
+      `of completion. A qualified human must verify this work before it can be marked 'done'. ` +
+      `CRITICAL: If the manager approves this review, they MUST provide explicit qualified verification evidence. ` +
+      `Without it, the task will remain in 'review' status.`;
+    proposalConfidence = 'medium';
+  } else {
+    // Routine task with self-report permitted:
+    // Mark as 'done' — this is a self-attestation, not independent proof.
+    finalTaskStatus = 'done';
+    verificationApplied = 'self-report';
+    claimStatus = 'processed';
+    proposalType = 'chat_completion_claim';
+    proposalSummary = `Chat-derived completion: "${taskRow.name}" marked done by ${reportingEmployee}'s self-report`;
+    proposalReasoning =
+      `Employee ${reportingEmployee} reported task completion in chat message ${messageId}: ` +
+      `"${claimText}". This is a routine task in the "${taskCategory}" category with self-report verification permitted. ` +
+      `The task has been marked as 'done' based on the employee's self-attestation. ` +
+      `IMPORTANT: This is a self-reported claim, NOT independent proof of completion. ` +
+      `The source chat message is preserved as evidence. The manager can review and reopen if needed.`;
+    proposalConfidence = 'high';
+  }
+
+  // ── 6. Execute all changes in a transaction ─────────────────────
+  const tx = d.transaction(() => {
+    // Record the completion claim.
+    d.prepare(
+      `INSERT OR IGNORE INTO completion_claims (id, workspace_id, task_id, message_id, reporting_employee, claim_text, claim_type, status, verification_applied, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(claimId, ws, taskId, messageId, reportingEmployee, claimText, claimType, claimStatus, verificationApplied, ts);
+
+    // Update the task status and completion field.
+    const completionText = `Chat-reported by ${reportingEmployee}: "${claimText.slice(0, 200)}" [Source: ${messageId}]`;
+    d.prepare('UPDATE tasks SET status = ?, completion = ?, updated_at = ? WHERE id = ?').run(
+      finalTaskStatus, completionText, ts, taskId,
+    );
+
+    // Create an AI proposal for manager visibility.
+    const proposalId = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const evidence = [
+      `Source message ID: ${messageId}`,
+      `Message text: "${claimText}"`,
+      `Message sender: ${msgRow.user_id}`,
+      `Task: ${taskRow.name} (ID: ${taskId})`,
+      `Task category: ${taskCategory}`,
+      `Task verification: ${taskVerification}`,
+      `Reporting employee: ${reportingEmployee}`,
+      `Task assignee: ${taskRow.assignee}`,
+      `Verification applied: ${verificationApplied}`,
+      `Claim type: ${claimType}`,
+    ];
+    if (protectedTask) {
+      evidence.push('PROTECTED: Requires qualified human verification before done');
+    } else {
+      evidence.push('ROUTINE: Self-report permitted — self-attestation recorded, not independent proof');
+    }
+
+    d.prepare(
+      `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, created_at)
+       VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    ).run(
+      proposalId, ws, proposalType, taskId, proposalSummary,
+      JSON.stringify(evidence), proposalReasoning, proposalConfidence,
+      JSON.stringify({ claimId, taskId, messageId, reportingEmployee, finalTaskStatus, verificationApplied }),
+      ts,
+    );
+
+    // Audit log entries.
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ws, 'chat_completion_claim', 'task', taskId, 'silent-ai',
+      `Completion claim from chat: ${reportingEmployee} reported "${claimText.slice(0, 100)}" (msg ${messageId}). Task → ${finalTaskStatus}. Verification: ${verificationApplied}`, ts,
+    );
+
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ws, 'task_status_changed', 'task', taskId, 'silent-ai',
+      `${taskRow.status} → ${finalTaskStatus} (chat-derived completion claim)`, ts,
+    );
+
+    bumpRevision();
+  });
+  tx();
+
+  // ── 7. Notify SSE clients ───────────────────────────────────────
+  notifySSE(ws, { type: 'task', action: 'updated', id: taskId, status: finalTaskStatus });
+  notifySSE(ws, { type: 'proposal', action: 'created', id: claimId });
+
+  // ── 8. Return the result ────────────────────────────────────────
+  const updatedTask = d.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  const proposal = d.prepare('SELECT * FROM ai_proposals WHERE entity_id = ? AND created_at = ?').get(taskId, ts);
+  const claim = d.prepare('SELECT * FROM completion_claims WHERE id = ?').get(claimId);
+
+  res.status(201).json({
+    message: protectedTask
+      ? 'Completion claim recorded. Task moved to review — qualified verification required.'
+      : 'Completion claim processed. Task marked done (self-attestation, not independent proof).',
+    claim: mapCompletionClaim(claim),
+    task: mapTask(updatedTask),
+    proposal: proposal ? mapProposal(proposal) : null,
+    verificationApplied,
+    finalTaskStatus,
+    protectedTask,
+    sourceMessage: { id: msgRow.id, user: msgRow.user_id, body: msgRow.body },
+  });
+});
+
+// ── Silent AI Analysis Log (Phase 5) ─────────────────────────────────
+//
+// These endpoints let the scheduled Silent AI automation record each
+// analysis run and let managers monitor when the AI last ran, how many
+// messages it analyzed, what it proposed, and whether any errors occurred.
+//
+// GET  /api/workspaces/:workspace/ai-status — latest run + aggregate stats
+// POST /api/workspaces/:workspace/ai-log   — record a new analysis run
+
+/** GET /api/workspaces/:workspace/ai-status — monitoring status for managers. */
+app.get('/api/workspaces/:workspace/ai-status', validateWorkspace, (req, res) => {
+  const d = getDB();
+
+  // Latest analysis run.
+  const latest = d.prepare(
+    'SELECT * FROM ai_analysis_log WHERE workspace_id = ? ORDER BY run_at DESC LIMIT 1',
+  ).get(req.workspaceId);
+
+  // Aggregate stats across all runs.
+  const agg = d.prepare(
+    `SELECT
+       COUNT(*)                    as total_runs,
+       COALESCE(SUM(messages_new), 0)      as total_messages_analyzed,
+       COALESCE(SUM(proposals_created), 0)  as total_proposals,
+       COALESCE(SUM(completion_claims), 0)  as total_claims,
+       MAX(run_at)                 as last_run_at
+     FROM ai_analysis_log WHERE workspace_id = ?`,
+  ).get(req.workspaceId);
+
+  // Check for stalled monitoring: no run in the last 2 hours.
+  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+  const lastRunAt = latest?.run_at || 0;
+  const stalled = lastRunAt > 0 && lastRunAt < twoHoursAgo;
+
+  res.json({
+    latest: latest ? mapAIAnalysisLog(latest) : null,
+    aggregates: {
+      totalRuns: agg.total_runs || 0,
+      totalMessagesAnalyzed: agg.total_messages_analyzed || 0,
+      totalProposalsCreated: agg.total_proposals || 0,
+      totalCompletionClaims: agg.total_claims || 0,
+      lastRunAt: agg.last_run_at || null,
+    },
+    stalled,
+    revision: currentRevision(),
+  });
+});
+
+/** POST /api/workspaces/:workspace/ai-log — record a Silent AI analysis run. */
+app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
+  const {
+    messagesTotal = 0,
+    messagesNew = 0,
+    proposalsCreated = 0,
+    completionClaims = 0,
+    errors = '',
+    lastMessageSeq = 0,
+    status = 'success',
+    summary = '',
+  } = req.body;
+
+  // Validate status enum.
+  const validStatuses = ['success', 'partial', 'error', 'stalled'];
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
+  }
+
+  const logId = `ail_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+  const d = getDB();
+
+  d.prepare(
+    `INSERT INTO ai_analysis_log (id, workspace_id, run_at, messages_total, messages_new, proposals_created, completion_claims, errors, last_message_seq, status, summary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    logId, req.workspaceId, ts,
+    Math.max(0, parseInt(messagesTotal, 10) || 0),
+    Math.max(0, parseInt(messagesNew, 10) || 0),
+    Math.max(0, parseInt(proposalsCreated, 10) || 0),
+    Math.max(0, parseInt(completionClaims, 10) || 0),
+    String(errors).slice(0, 2000),
+    Math.max(0, parseInt(lastMessageSeq, 10) || 0),
+    status,
+    String(summary).slice(0, 2000),
+    ts,
+  );
+
+  // Log to audit trail for traceability.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId, 'ai_analysis_run', 'ai_log', logId, 'silent-ai',
+    `Analysis run: ${messagesNew} new msgs, ${proposalsCreated} proposals, ${completionClaims} claims. Status: ${status}${errors ? '. Errors: ' + String(errors).slice(0, 200) : ''}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'ai_log', action: 'recorded', id: logId });
+
+  const row = d.prepare('SELECT * FROM ai_analysis_log WHERE id = ?').get(logId);
+  res.status(201).json(mapAIAnalysisLog(row));
+});
+
 // ── Sync endpoint (for polling) ─────────────────────────────────────
 
 /** GET /api/sync?workspace=X&revision=N — returns whether data changed since revision N. */
@@ -716,6 +1097,8 @@ app.get('/api/sync', (req, res) => {
 app.post('/api/reset', (_req, res) => {
   const d = getDB();
   d.exec(`
+    DELETE FROM ai_analysis_log;
+    DELETE FROM completion_claims;
     DELETE FROM ai_proposals;
     DELETE FROM audit_log;
     DELETE FROM handovers;
@@ -752,6 +1135,17 @@ app.use(express.static(ROOT, {
 // SPA fallback: any non-file, non-API path returns index.html.
 app.use((req, res) => {
   res.sendFile(join(ROOT, 'index.html'));
+});
+
+// ── Error handler (catches JSON parse errors, validation errors, etc.) ──
+// Must be registered LAST (after all routes and middleware). Without this,
+// a malformed JSON body (e.g., truncated request) crashes the process.
+app.use((err, req, res, _next) => {
+  if (err instanceof SyntaxError && 'body' in err) {
+    return res.status(400).json({ error: 'Invalid JSON in request body', detail: err.message });
+  }
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ error: 'Internal server error', detail: err.message });
 });
 
 // ── Start ───────────────────────────────────────────────────────────

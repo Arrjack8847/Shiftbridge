@@ -33,6 +33,8 @@ let data = {
   tasks: [],
   issues: [],
   proposals: [],
+  completionClaims: [],
+  aiStatus: null,
   shifts: {},
   handovers: {},
 };
@@ -87,7 +89,7 @@ function taskDetail(id) {
   const t = data.tasks.find((x) => x.id === id && x.ws === currentWorkspace);
   if (!t) return notFound();
   const source = data.messages.find((m) => m.id === t.source);
-  return `<section class="surface-page"><button class="section-back" data-nav="tasks">${icon('back', 17)} My Tasks</button>${pageHeading(t.name, `Due ${e(t.due)}`, taskStatus(t.status))}<div class="two-col"><div class="stack"><div class="card"><div class="eyebrow">WHAT TO DO</div><p class="readable">${e(t.description)}</p><div class="divider"></div><div class="row between"><span class="muted small">Assigned to</span><span class="row">${personAvatar(t.assignee)} ${e(member(t.assignee).name)}</span></div><div class="divider"></div><div class="row between"><span class="muted small">Priority</span>${badge(t.priority.toUpperCase(), t.priority === 'high' ? 'red' : 'blue')}</div><div class="divider"></div><div class="row between"><span class="muted small">Verification</span><strong class="small">${t.verification === 'qualified' ? 'Qualified human review' : 'Self-report permitted'}</strong></div></div>${source ? `<div class="card"><div class="card-title">From team chat</div><div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)} · ${displayTime(source.at)}</small></div><button class="text-btn" data-nav="chat">${icon('chat', 15)} Return to chat</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Update this task</div><p class="muted small">Keep your team informed with a clear status.</p>${t.status === 'todo' ? `<button class="btn full" data-action="task-start" data-id="${e(t.id)}">${icon('check', 17)} Start task</button>` : ''}${['todo', 'doing'].includes(t.status) ? `<button class="btn ${t.status === 'doing' ? '' : 'outline'} full" style="margin-top:9px" data-action="task-complete" data-id="${e(t.id)}">${icon('check', 17)} Report complete</button><button class="btn outline full" style="margin-top:9px" data-action="task-blocked" data-id="${e(t.id)}">Can't do it</button>` : ''}${t.status === 'review' && admin() ? `<button class="btn full" style="margin-top:9px" data-action="task-verify" data-id="${e(t.id)}">${icon('check', 17)} Verify and approve</button>` : ''}${t.status === 'review' ? `<div class="soft-panel" style="margin-top:9px"><strong>Awaiting qualified review.</strong> Completion has been self-reported — this is <em>not</em> independent verification.</div>` : ''}${t.status === 'done' ? `<div class="soft-panel" style="margin-top:9px"><strong>${e(t.completion || 'Completed')}</strong>${t.verification === 'qualified' ? '<br/><small class="muted">Verified by administrator in this demo.</small>' : '<br/><small class="muted">Self-reported by the assignee.</small>'}</div>` : ''}${t.status === 'blocked' ? `<div class="alert-panel" style="margin-top:9px">${icon('alert', 17)} ${e(t.completion || 'This task needs manager attention.')}</div>` : ''}${admin() && t.status !== 'todo' ? `<button class="btn outline full" style="margin-top:9px" data-action="task-reopen" data-id="${e(t.id)}">Reopen task</button>` : ''}</div></div></div></section>`;
+  return `<section class="surface-page"><button class="section-back" data-nav="tasks">${icon('back', 17)} My Tasks</button>${pageHeading(t.name, `Due ${e(t.due)}`, taskStatus(t.status))}<div class="two-col"><div class="stack"><div class="card"><div class="eyebrow">WHAT TO DO</div><p class="readable">${e(t.description)}</p><div class="divider"></div><div class="row between"><span class="muted small">Assigned to</span><span class="row">${personAvatar(t.assignee)} ${e(member(t.assignee).name)}</span></div><div class="divider"></div><div class="row between"><span class="muted small">Priority</span>${badge(t.priority.toUpperCase(), t.priority === 'high' ? 'red' : 'blue')}</div><div class="divider"></div><div class="row between"><span class="muted small">Verification</span><strong class="small">${t.verification === 'qualified' ? 'Qualified human review' : 'Self-report permitted'}</strong></div></div>${source ? `<div class="card"><div class="card-title">From team chat</div><div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)} · ${displayTime(source.at)}</small></div><button class="text-btn" data-nav="chat">${icon('chat', 15)} Return to chat</button></div>` : ''}${(() => { const claims = wsItems(data.completionClaims).filter((c) => c.taskId === t.id); if (!claims.length) return ''; const claim = claims[0]; const claimMsg = data.messages.find((m) => m.id === claim.messageId); return `<div class="card"><div class="card-title">Chat completion evidence</div><div class="soft-panel"><strong>${e(claim.claimType)}</strong> — ${badge(claim.status.toUpperCase(), claim.status === 'rejected' ? 'red' : claim.status === 'pending_review' ? 'amber' : '')}<br/><small class="muted">Reported by ${e(member(claim.reportingEmployee).name)}</small><br/><small class="muted">Verification: ${e(claim.verificationApplied)}</small>${claimMsg ? `<div class="divider"></div><p>"${e(claimMsg.body)}"</p><small class="muted">— ${e(member(claimMsg.user).name)} · ${displayTime(claimMsg.at)}</small>` : ''}</div><div class="alert-panel" style="margin-top:9px"><small>${icon('shield', 14)} This is an employee self-attestation detected from chat, NOT independent proof of completion.${claim.verificationApplied === 'qualified' ? ' Qualified human verification is still required.' : ''}</small></div></div>`; })()}</div><div class="stack"><div class="card"><div class="card-title">Update this task</div><p class="muted small">Keep your team informed with a clear status.</p>${t.status === 'todo' ? `<button class="btn full" data-action="task-start" data-id="${e(t.id)}">${icon('check', 17)} Start task</button>` : ''}${['todo', 'doing'].includes(t.status) ? `<button class="btn ${t.status === 'doing' ? '' : 'outline'} full" style="margin-top:9px" data-action="task-complete" data-id="${e(t.id)}">${icon('check', 17)} Report complete</button><button class="btn outline full" style="margin-top:9px" data-action="task-blocked" data-id="${e(t.id)}">Can't do it</button>` : ''}${t.status === 'review' && admin() ? `<button class="btn full" style="margin-top:9px" data-action="task-verify" data-id="${e(t.id)}">${icon('check', 17)} Verify and approve</button>` : ''}${t.status === 'review' ? `<div class="soft-panel" style="margin-top:9px"><strong>Awaiting qualified review.</strong> Completion has been self-reported — this is <em>not</em> independent verification.</div>` : ''}${t.status === 'done' ? `<div class="soft-panel" style="margin-top:9px"><strong>${e(t.completion || 'Completed')}</strong>${t.verification === 'qualified' ? '<br/><small class="muted">Verified by administrator in this demo.</small>' : '<br/><small class="muted">Self-reported by the assignee.</small>'}</div>` : ''}${t.status === 'blocked' ? `<div class="alert-panel" style="margin-top:9px">${icon('alert', 17)} ${e(t.completion || 'This task needs manager attention.')}</div>` : ''}${admin() && t.status !== 'todo' ? `<button class="btn outline full" style="margin-top:9px" data-action="task-reopen" data-id="${e(t.id)}">Reopen task</button>` : ''}</div></div></div></section>`;
 }
 
 function chatScreen() {
@@ -114,8 +116,8 @@ const managePages = [['attention', 'Needs Attention', 'alert', 'Review problems 
 
 /** Render a single proposal card with evidence, reasoning, and approve/reject buttons. */
 function proposalCard(p) {
-  const typeLabels = { task_proposal: 'Task Proposal', completion_review: 'Completion Review', refusal: 'Protected Work Refusal' };
-  const typeBadge = { task_proposal: 'blue', completion_review: 'amber', refusal: 'red' };
+  const typeLabels = { task_proposal: 'Task Proposal', completion_review: 'Completion Review', refusal: 'Protected Work Refusal', chat_completion_claim: 'Chat Completion Claim' };
+  const typeBadge = { task_proposal: 'blue', completion_review: 'amber', refusal: 'red', chat_completion_claim: 'sea' };
   const confidenceLabel = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence' };
   const reviewed = p.status !== 'pending';
   const isProtected = p.type === 'completion_review' && (p.evidence || []).some((ev) => ev.toLowerCase().includes('qualified review') || ev.toLowerCase().includes('safety note'));
@@ -124,7 +126,13 @@ function proposalCard(p) {
 
 function manageHome() {
   const pendingProposals = wsItems(data.proposals).filter((p) => p.status === 'pending');
-  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div></div>${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
+  const ai = data.aiStatus;
+  const aiLatest = ai?.latest;
+  const aiAgg = ai?.aggregates;
+  const aiStalled = ai?.stalled;
+  const aiLastRun = aiLatest?.runAt ? displayTime(aiLatest.runAt) : 'Never';
+  const aiCard = ai ? `<div class="card ai-monitor-card"><div class="row between"><div class="eyebrow">${icon('spark', 16)} SILENT AI MONITORING</div>${aiStalled ? badge('STALLED', 'red') : aiLatest ? badge('ACTIVE', '') : badge('NOT RUN', 'gray')}</div><div class="metric-grid" style="margin-top:12px"><div class="metric"><small>Last analysis</small><b style="font-size:13px">${e(aiLastRun)}</b></div><div class="metric"><small>Messages analyzed</small><b>${aiAgg?.totalMessagesAnalyzed || 0}</b></div><div class="metric"><small>Proposals created</small><b>${aiAgg?.totalProposalsCreated || 0}</b></div><div class="metric"><small>Completion claims</small><b>${aiAgg?.totalCompletionClaims || 0}</b></div></div>${aiLatest?.errors ? `<div class="alert-panel" style="margin-top:10px;padding:8px 12px;font-size:13px">${icon('alert', 14)} ${e(aiLatest.errors.slice(0, 150))}</div>` : ''}${aiLatest?.summary ? `<p class="small muted" style="margin-top:8px">${e(aiLatest.summary.slice(0, 200))}</p>` : ''}<p class="small muted" style="margin-top:8px">Scheduled hourly. The AI reads messages, proposes tasks, and processes completion claims — never posts to chat.</p></div>` : '';
+  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div></div>${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
 }
 
 function attentionScreen() {
@@ -639,7 +647,7 @@ let sseCleanup = null;
 async function loadAllData() {
   try {
     await refreshWorkspaces();
-    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
+    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
   } catch (err) {
     connectionStatus = 'offline';
@@ -688,6 +696,21 @@ async function refreshProposals() {
   } catch { /* proposals endpoint may not exist yet */ }
 }
 
+async function refreshCompletionClaims() {
+  try {
+    const res = await api.getCompletionClaims(currentWorkspace);
+    data.completionClaims = res.claims || [];
+    if (res.revision) serverRevision = res.revision;
+  } catch { /* completion claims endpoint may not exist yet */ }
+}
+
+async function refreshAIStatus() {
+  try {
+    const res = await api.getAIStatus(currentWorkspace);
+    data.aiStatus = res;
+  } catch { /* ai-status endpoint may not exist yet */ }
+}
+
 async function refreshShifts() {
   try {
     const res = await api.getShift(currentWorkspace);
@@ -704,7 +727,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -716,7 +739,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
       render();

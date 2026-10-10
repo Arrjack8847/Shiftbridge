@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = resolve(__dirname, 'shiftbridge.db');
+const DB_PATH = process.env.SHIFTBRIDGE_DB_PATH || resolve(__dirname, 'shiftbridge.db');
 
 /** @type {Database.Database} */
 let db;
@@ -185,6 +185,52 @@ export function initSchema() {
 
     CREATE INDEX IF NOT EXISTS idx_proposals_ws ON ai_proposals(workspace_id, status, created_at);
     CREATE INDEX IF NOT EXISTS idx_proposals_entity ON ai_proposals(entity_type, entity_id);
+
+    -- Track chat-derived completion claims. Each row links a chat message
+    -- to a task, recording who reported it, what verification policy was
+    -- applied, and whether it was processed, rejected, or is pending review.
+    -- The (task_id, message_id) pair is unique — prevents duplicate processing
+    -- of the same chat message for the same task.
+    CREATE TABLE IF NOT EXISTS completion_claims (
+      id                  TEXT PRIMARY KEY,
+      workspace_id        TEXT NOT NULL,
+      task_id             TEXT NOT NULL,
+      message_id          TEXT NOT NULL,
+      reporting_employee  TEXT NOT NULL,
+      claim_text          TEXT NOT NULL,
+      claim_type          TEXT NOT NULL DEFAULT 'completion',
+      status              TEXT NOT NULL DEFAULT 'processed',
+      verification_applied TEXT NOT NULL DEFAULT 'self-report',
+      created_at          INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_claims_task_msg ON completion_claims(task_id, message_id);
+    CREATE INDEX IF NOT EXISTS idx_claims_ws ON completion_claims(workspace_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_claims_task ON completion_claims(task_id);
+
+    -- Phase 5: Silent AI analysis log. Each row records one scheduled
+    -- analysis run: how many messages were examined, how many proposals
+    -- and completion claims were created, and whether any errors occurred.
+    -- The last_message_seq column doubles as a processing checkpoint —
+    -- the automation reads the most recent row to know where it left off.
+    CREATE TABLE IF NOT EXISTS ai_analysis_log (
+      id              TEXT PRIMARY KEY,
+      workspace_id    TEXT NOT NULL,
+      run_at          INTEGER NOT NULL,
+      messages_total  INTEGER NOT NULL DEFAULT 0,
+      messages_new    INTEGER NOT NULL DEFAULT 0,
+      proposals_created     INTEGER NOT NULL DEFAULT 0,
+      completion_claims     INTEGER NOT NULL DEFAULT 0,
+      errors          TEXT DEFAULT '',
+      last_message_seq INTEGER NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'success',
+      summary         TEXT DEFAULT '',
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ai_log_ws ON ai_analysis_log(workspace_id, run_at);
   `);
 
   // Initialize revision counter if not present.
@@ -316,6 +362,40 @@ export function mapProposal(row) {
     proposedData,
     reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at,
+    createdAt: row.created_at,
+  };
+}
+
+export function mapCompletionClaim(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ws: row.workspace_id,
+    taskId: row.task_id,
+    messageId: row.message_id,
+    reportingEmployee: row.reporting_employee,
+    claimText: row.claim_text,
+    claimType: row.claim_type,
+    status: row.status,
+    verificationApplied: row.verification_applied,
+    createdAt: row.created_at,
+  };
+}
+
+export function mapAIAnalysisLog(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ws: row.workspace_id,
+    runAt: row.run_at,
+    messagesTotal: row.messages_total,
+    messagesNew: row.messages_new,
+    proposalsCreated: row.proposals_created,
+    completionClaims: row.completion_claims,
+    errors: row.errors || '',
+    lastMessageSeq: row.last_message_seq,
+    status: row.status,
+    summary: row.summary || '',
     createdAt: row.created_at,
   };
 }
