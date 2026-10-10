@@ -37,6 +37,7 @@ import {
 } from './db.js';
 import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
+import { processMessage as groqProcessMessage, processPendingJobs, getGroqStatus } from './groq-agent.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..'); // project root (parent of server/)
@@ -276,6 +277,29 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
   if (info.changes > 0) {
     bumpRevision();
     notifySSE(req.workspaceId, { type: 'message', id: msgId, user, body: text.slice(0, 1500), at: ts });
+
+    // ── Groq AI: fire async processing (non-blocking) ────────────
+    // The response is sent immediately — chat is never blocked.
+    // The agent fetches context, calls Groq API, executes actions,
+    // and SSE pushes updates to all clients when done.
+    setImmediate(() => {
+      groqProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
+        .then(result => {
+          if (result.ok) {
+            console.log(`[groq-ai] Processed message ${msgId}: ${result.actions?.length || 0} actions, ${result.latency}ms`);
+            notifySSE(req.workspaceId, {
+              type: 'ai_processed',
+              messageId: msgId,
+              actions: result.actions?.length || 0,
+              analysis: result.analysis?.slice(0, 200) || '',
+              latency: result.latency,
+            });
+          } else if (!result.skipped) {
+            console.error(`[groq-ai] Failed for ${msgId}: ${result.error} (willRetry: ${result.willRetry})`);
+          }
+        })
+        .catch(err => console.error('[groq-ai] Unexpected error:', err.message));
+    });
   }
 
   const row = d.prepare('SELECT * FROM messages WHERE id = ?').get(msgId);
@@ -1150,6 +1174,22 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
 
   const row = d.prepare('SELECT * FROM ai_analysis_log WHERE id = ?').get(logId);
   res.status(201).json(mapAIAnalysisLog(row));
+});
+
+// ── Groq AI Integration Endpoints ────────────────────────────────────
+//
+// GET  /api/workspaces/:workspace/groq-status — Groq agent status (jobs, latency, model)
+// POST /api/groq/retry-pending                — Recovery: retry failed/pending jobs
+
+/** GET /api/workspaces/:workspace/groq-status — Groq agent monitoring. */
+app.get('/api/workspaces/:workspace/groq-status', validateWorkspace, (req, res) => {
+  res.json(getGroqStatus(req.workspaceId));
+});
+
+/** POST /api/groq/retry-pending — recovery endpoint for failed/pending jobs. */
+app.post('/api/groq/retry-pending', async (_req, res) => {
+  const result = await processPendingJobs();
+  res.json(result);
 });
 
 // ── Silent AI Run Lifecycle (Phase 5.1 — Fix 4) ──────────────────────

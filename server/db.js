@@ -362,6 +362,33 @@ export function initSchema() {
     WHERE source IS NOT NULL
   `);
 
+  // ── Groq Integration: persistent AI job queue ────────────────────
+  // Tracks each Groq API processing job for a message. Jobs that fail
+  // (API down, parse error, etc.) remain in 'pending' or 'failed' status
+  // for retry by the next message trigger or the hourly recovery automation.
+  // Unique index on message_id prevents duplicate jobs for the same message.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS ai_jobs (
+      id              TEXT PRIMARY KEY,
+      workspace_id    TEXT NOT NULL,
+      message_id      TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      attempts        INTEGER NOT NULL DEFAULT 0,
+      max_attempts    INTEGER NOT NULL DEFAULT 3,
+      last_error      TEXT DEFAULT '',
+      actions_json    TEXT DEFAULT '',
+      latency_ms      INTEGER DEFAULT 0,
+      model_used      TEXT DEFAULT '',
+      tokens_used     INTEGER DEFAULT 0,
+      created_at      INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL,
+      completed_at    INTEGER,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_jobs(status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_jobs_msg ON ai_jobs(message_id);
+  `);
+
   // Initialize revision counter if not present.
   const row = d.prepare('SELECT value FROM meta WHERE key = ?').get('revision');
   if (!row) {
