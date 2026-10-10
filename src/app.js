@@ -118,7 +118,8 @@ function proposalCard(p) {
   const typeBadge = { task_proposal: 'blue', completion_review: 'amber', refusal: 'red' };
   const confidenceLabel = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence' };
   const reviewed = p.status !== 'pending';
-  return `<div class="proposal-card ${reviewed ? 'reviewed' : ''}"><div class="proposal-header"><span class="badge ${typeBadge[p.type] || ''}">${e(typeLabels[p.type] || p.type)}</span>${badge(confidenceLabel[p.confidence] || p.confidence, p.confidence === 'high' ? '' : 'amber')}${reviewed ? badge(p.status.toUpperCase(), p.status === 'approved' ? '' : 'red') : ''}</div><p class="proposal-summary">${e(p.summary)}</p>${p.evidence && p.evidence.length ? `<div class="proposal-evidence"><div class="eyebrow">EVIDENCE</div><ul>${p.evidence.map((item) => `<li>${e(item)}</li>`).join('')}</ul></div>` : ''}${p.reasoning ? `<div class="proposal-reasoning"><div class="eyebrow">AI REASONING</div><p>${e(p.reasoning)}</p></div>` : ''}${!reviewed ? `<div class="proposal-actions"><button class="btn" data-action="approve-proposal" data-id="${e(p.id)}">${icon('check', 16)} Approve</button><button class="btn outline" data-action="reject-proposal" data-id="${e(p.id)}">Reject</button></div>` : `<div class="proposal-reviewed-note"><small>Reviewed by ${e(p.reviewedBy || 'manager')} · ${p.reviewedAt ? displayTime(p.reviewedAt) : ''}</small></div>`}</div>`;
+  const isProtected = p.type === 'completion_review' && (p.evidence || []).some((ev) => ev.toLowerCase().includes('qualified review') || ev.toLowerCase().includes('safety note'));
+  return `<div class="proposal-card ${reviewed ? 'reviewed' : ''}"><div class="proposal-header"><span class="badge ${typeBadge[p.type] || ''}">${e(typeLabels[p.type] || p.type)}</span>${isProtected ? '<span class="badge red">PROTECTED</span>' : ''}${badge(confidenceLabel[p.confidence] || p.confidence, p.confidence === 'high' ? '' : 'amber')}${reviewed ? badge(p.status.toUpperCase(), p.status === 'approved' ? '' : 'red') : ''}</div><p class="proposal-summary">${e(p.summary)}</p>${p.evidence && p.evidence.length ? `<div class="proposal-evidence"><div class="eyebrow">EVIDENCE</div><ul>${p.evidence.map((item) => `<li>${e(item)}</li>`).join('')}</ul></div>` : ''}${p.reasoning ? `<div class="proposal-reasoning"><div class="eyebrow">AI REASONING</div><p>${e(p.reasoning)}</p></div>` : ''}${!reviewed ? `<div class="proposal-actions"><button class="btn" data-action="approve-proposal" data-id="${e(p.id)}">${icon('check', 16)} Approve</button><button class="btn outline" data-action="reject-proposal" data-id="${e(p.id)}">Reject</button></div>` : `<div class="proposal-reviewed-note"><small>Reviewed by ${e(p.reviewedBy || 'manager')} · ${p.reviewedAt ? displayTime(p.reviewedAt) : ''}</small></div>`}</div>`;
 }
 
 function manageHome() {
@@ -383,8 +384,29 @@ app.addEventListener('click', async (event) => {
   if (action === 'approve-proposal' || action === 'reject-proposal') {
     if (!admin()) return notify('Only administrators can review AI proposals.');
     const decision = action === 'approve-proposal' ? 'approve' : 'reject';
-    // Optimistic update.
     const prop = data.proposals.find((p) => p.id === id);
+
+    // Check if this is a protected completion_review that needs qualified evidence.
+    // The MCP server adds evidence strings containing "qualified review" or
+    // "SAFETY NOTE" for protected tasks.
+    const isProtectedCompletion = decision === 'approve' && prop && prop.type === 'completion_review' &&
+      ((prop.evidence || []).some((e) => e.toLowerCase().includes('qualified review') || e.toLowerCase().includes('safety note')) ||
+       (prop.reasoning || '').toLowerCase().includes('qualified verification'));
+
+    // Prompt for qualified verification evidence for protected tasks.
+    let qualifiedVerification = '';
+    if (isProtectedCompletion) {
+      qualifiedVerification = (window.prompt(
+        'PROTECTED TASK — Qualified Verification Required\n\n' +
+        'This completion claim is for a protected task (repairs, purchases, or safety).\n' +
+        'To mark the task as DONE, you must provide qualified verification evidence.\n' +
+        'If you approve without evidence, the task will remain in REVIEW.\n\n' +
+        'Enter verification evidence (e.g., "Technician report #TR-2026, safety inspection passed"):',
+        ''
+      ) || '').trim();
+    }
+
+    // Optimistic update.
     if (prop) {
       prop.status = decision === 'approve' ? 'approved' : 'rejected';
       prop.reviewedBy = identity.userId;
@@ -392,8 +414,16 @@ app.addEventListener('click', async (event) => {
       render();
     }
     try {
-      await api.reviewProposal(id, { decision, reviewer: identity.userId });
-      notify(decision === 'approve' ? 'Proposal approved' : 'Proposal rejected');
+      const body = { decision, reviewer: identity.userId };
+      if (qualifiedVerification) body.qualifiedVerification = qualifiedVerification;
+      await api.reviewProposal(id, body);
+      if (isProtectedCompletion && !qualifiedVerification) {
+        notify('Approved — task remains in REVIEW. Qualified verification evidence required to mark done.');
+      } else if (isProtectedCompletion && qualifiedVerification) {
+        notify('Approved — task marked DONE with qualified verification evidence.');
+      } else {
+        notify(decision === 'approve' ? 'Proposal approved' : 'Proposal rejected');
+      }
       // Refresh tasks since approving a task_proposal creates a task,
       // and approving/rejecting a completion_review changes task status.
       await Promise.all([refreshTasks(), refreshProposals()]);

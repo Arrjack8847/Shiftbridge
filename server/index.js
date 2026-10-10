@@ -640,13 +640,35 @@ app.put('/api/proposals/:id/review', (req, res) => {
           `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_created', 'task', taskId, 'silent-ai', `Created from approved proposal: ${pd.name}`, ts,
         );
       } else if (row.type === 'completion_review' && row.entity_id) {
-        // Approve the completion claim — mark task as 'done'.
+        // ── CRITICAL SAFETY: Protected tasks cannot be marked 'done' just
+        // because a manager approved the AI completion review. A demo
+        // manager role is NOT qualified verification. Protected tasks
+        // (repairs, purchases, safety, or verification='qualified')
+        // remain in 'review' until explicit qualified verification
+        // evidence is provided in the review body (qualifiedVerification).
         const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get(row.entity_id);
         if (taskRow) {
-          d.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run('done', ts, row.entity_id);
-          d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-            `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', row.entity_id, 'silent-ai', `review → done (AI review approved)`, ts,
-          );
+          const protectedTask = isProtectedTask(taskRow);
+          const verificationEvidence = String(req.body.qualifiedVerification || '').trim();
+          const hasQualifiedEvidence = verificationEvidence.length > 0;
+
+          if (protectedTask && !hasQualifiedEvidence) {
+            // Approval acknowledges the AI review, but the task REMAINS
+            // in 'review' — qualified verification evidence is still required.
+            d.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(ts, row.entity_id);
+            d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+              `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'completion_review_approved_unverified', 'task', row.entity_id, reviewer, `Approved by ${reviewer} but task remains in review — protected work requires qualified verification evidence`, ts,
+            );
+          } else {
+            // Non-protected task OR protected task WITH qualified evidence → done.
+            d.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run('done', ts, row.entity_id);
+            const auditDetails = protectedTask
+              ? `review → done (qualified verification by ${reviewer}: "${verificationEvidence}")`
+              : `review → done (AI review approved by ${reviewer})`;
+            d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+              `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', row.entity_id, reviewer, auditDetails, ts,
+            );
+          }
         }
       }
       // For 'refusal' type: approval means the manager acknowledges the refusal.

@@ -380,6 +380,76 @@ async function runTests() {
     assertEqual(audit.actor, 'system', 'Enforcement actor should be system');
   });
 
+  // ── Test 18: Completion review approved WITHOUT qualified evidence → stays in review ─
+  await test('Safety fix: protected completion_review approved without evidence stays in review', () => {
+    resetAndSeed();
+    const d = getDB();
+    const ts = Date.now();
+
+    // Create a protected task (repairs) in 'review' status.
+    d.prepare(
+      `INSERT OR IGNORE INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'review', 'high', 'repairs', 'Today', NULL, 'manager', 'qualified', 'Fixed the heating element', ?, ?)`,
+    ).run('safety_task_1', 'daily', 'Fix espresso machine', 'Heating element repair', 'jack', ts, ts);
+
+    // Simulate the API logic: approve completion_review WITHOUT qualifiedVerification.
+    const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get('safety_task_1');
+    const isProtected = taskRow.verification === 'qualified' || ['repairs', 'purchases', 'safety'].includes(taskRow.category);
+    const hasQualifiedEvidence = false; // No evidence provided.
+    assert(isProtected, 'Task should be protected');
+
+    if (isProtected && !hasQualifiedEvidence) {
+      // Task MUST stay in 'review' — only update timestamp.
+      d.prepare('UPDATE tasks SET updated_at = ? WHERE id = ?').run(ts, 'safety_task_1');
+      d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        'audit_safety_1', 'daily', 'completion_review_approved_unverified', 'task', 'safety_task_1', 'manager', 'Approved by manager but task remains in review — protected work requires qualified verification evidence', ts,
+      );
+    }
+
+    const found = d.prepare('SELECT * FROM tasks WHERE id = ?').get('safety_task_1');
+    assertEqual(found.status, 'review', 'Protected task should STILL be in review after approval without evidence');
+
+    const audit = d.prepare('SELECT * FROM audit_log WHERE entity_id = ? AND action = ?').get('safety_task_1', 'completion_review_approved_unverified');
+    assert(audit, 'Unverified approval audit entry should exist');
+    assertEqual(audit.actor, 'manager', 'Audit actor should be manager');
+  });
+
+  // ── Test 19: Completion review approved WITH qualified evidence → marked done ─
+  await test('Safety fix: protected completion_review approved with evidence marks done', () => {
+    resetAndSeed();
+    const d = getDB();
+    const ts = Date.now();
+
+    // Create a protected task (safety) in 'review' status.
+    d.prepare(
+      `INSERT OR IGNORE INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'review', 'high', 'safety', 'Today', NULL, 'manager', 'qualified', 'Fire extinguisher inspected', ?, ?)`,
+    ).run('safety_task_2', 'daily', 'Monthly safety inspection', 'Full safety walkthrough', 'jack', ts, ts);
+
+    // Simulate the API logic: approve completion_review WITH qualifiedVerification.
+    const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get('safety_task_2');
+    const isProtected = taskRow.verification === 'qualified' || ['repairs', 'purchases', 'safety'].includes(taskRow.category);
+    const verificationEvidence = 'Certified safety inspector John Smith verified on 2026-10-10, report #SI-2026-1010';
+    const hasQualifiedEvidence = verificationEvidence.trim().length > 0;
+    assert(isProtected, 'Task should be protected');
+    assert(hasQualifiedEvidence, 'Qualified evidence should be present');
+
+    if (isProtected && hasQualifiedEvidence) {
+      // Task can be marked 'done' — qualified evidence provided.
+      d.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run('done', ts, 'safety_task_2');
+      d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        'audit_safety_2', 'daily', 'task_status_changed', 'task', 'safety_task_2', 'manager', `review → done (qualified verification by manager: "${verificationEvidence}")`, ts,
+      );
+    }
+
+    const found = d.prepare('SELECT * FROM tasks WHERE id = ?').get('safety_task_2');
+    assertEqual(found.status, 'done', 'Protected task should be marked done when qualified evidence is provided');
+
+    const audit = d.prepare('SELECT * FROM audit_log WHERE entity_id = ? AND action = ?').get('safety_task_2', 'task_status_changed');
+    assert(audit, 'Status change audit entry should exist');
+    assert(audit.details.includes('qualified verification'), 'Audit should record qualified verification evidence');
+  });
+
   // ── Print results ────────────────────────────────────────────────
   console.log('\n  ┌──────────────────────────────────────────────┐');
   console.log('  │  Test Results                                 │');

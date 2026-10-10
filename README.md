@@ -7,8 +7,8 @@ The **single group chat** is the home screen for employees and administrators. O
 ## Architecture
 
 - **Frontend**: Vanilla HTML/CSS/JavaScript (no React/Next.js)
-- **Backend**: Node.js + Express + SQLite (better-sqlite3)
-- **MCP Server**: Stdio transport server exposing 5 AI tools
+- **Backend**: Node.js + Express 5 + SQLite (better-sqlite3)
+- **MCP Server**: Official `@modelcontextprotocol/sdk` (v1.32.1), stdio transport, 8 AI tools
 - **Real-time sync**: Server-Sent Events (SSE) + 2-second polling fallback
 - **Database**: Single SQLite file at `server/shiftbridge.db`
 
@@ -17,7 +17,7 @@ The backend is the **single source of truth** for all shared data: messages, tas
 ## Quick start
 
 ```bash
-# Install dependencies
+# Install dependencies (includes MCP SDK)
 npm install
 
 # Start the backend (serves both API and static frontend)
@@ -32,7 +32,7 @@ Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on ph
 
 ## Silent AI Agent (MCP Integration)
 
-The Silent AI agent connects via **Model Context Protocol (MCP)** with stdio transport. It monitors workspace activity and creates proposals that managers review in the dashboard.
+The Silent AI agent connects via **Model Context Protocol (MCP)** with stdio transport, using the official `@modelcontextprotocol/sdk`. It monitors workspace activity and creates proposals that managers review in the dashboard.
 
 ### Connecting WorkBuddy Desktop
 
@@ -42,8 +42,8 @@ The MCP config is at `~/.workbuddy-ai/mcp.json`:
 {
   "mcpServers": {
     "shiftbridge": {
-      "command": "node",
-      "args": ["C:\\path\\to\\server\\mcp-server.js"]
+      "command": "C:\\Users\\<user>\\.workbuddy-ai\\binaries\\node\\versions\\22.22.2-6\\node.exe",
+      "args": ["C:\\<project-path>\\server\\mcp-server.js"]
     }
   }
 }
@@ -51,19 +51,31 @@ The MCP config is at `~/.workbuddy-ai/mcp.json`:
 
 After adding the config, open WorkBuddy Desktop → Connectors → trust the new MCP server.
 
-### MCP Tools (5)
+### MCP Tools (8)
 
 | Tool | Description |
 |------|-------------|
-| `list_tasks` | List all tasks in a workspace with status, assignee, category, and verification |
-| `propose_task` | Propose a new task with evidence and reasoning for manager review |
-| `review_completion` | Review a completion claim, gather evidence, produce AI reasoning |
+| `get_recent_messages` | Read recent chat messages from a workspace (IDs, sender, body, timestamp) |
+| `get_active_tasks` | List all tasks with status, assignee, category, verification, and protected flags |
+| `get_workspace_rules` | Show permitted (self-report) and locked (qualified) categories per workspace |
+| `list_tasks` | List all tasks in a workspace (alias of get_active_tasks) |
+| `propose_task` | Propose a new task with evidence and AI reasoning for manager review |
+| `propose_completion` | Review a completion claim, gather evidence, produce AI reasoning, create proposal |
 | `refuse_protected_work` | Create a refusal proposal for protected work lacking qualified verification |
 | `get_audit_trail` | Retrieve the full audit log for a workspace |
 
 ### Protected Task Enforcement
 
 Tasks in **repairs**, **purchases**, or **safety** categories automatically get `verification: 'qualified'`. When an employee tries to mark these as `done`, the server redirects the status to `review` instead — the completion claim is preserved but requires qualified review before final approval.
+
+### CRITICAL SAFETY: Qualified Verification Requirement
+
+When a manager approves a `completion_review` proposal for a **protected task** (repairs, purchases, safety, or any task with `verification: 'qualified'`):
+
+- **Without** qualified verification evidence → the task **remains in `review`** status. The approval is recorded, but a demo manager role alone is **NOT** qualified verification.
+- **With** explicit qualified verification evidence (e.g., technician report, inspection certificate) → the task is marked `done`.
+
+The manager dashboard prompts for qualified verification evidence when approving a protected completion review. The audit log records whether verification evidence was provided.
 
 ## API endpoints
 
@@ -85,7 +97,7 @@ Tasks in **repairs**, **purchases**, or **safety** categories automatically get 
 | GET | `/api/workspaces/:ws/proposals` | List AI proposals (supports `?status=pending`) |
 | GET | `/api/proposals/:id` | Get a single proposal |
 | POST | `/api/workspaces/:ws/proposals` | Create an AI proposal (task_proposal, completion_review, refusal) |
-| PUT | `/api/proposals/:id/review` | Approve or reject a proposal (auto-applies side effects) |
+| PUT | `/api/proposals/:id/review` | Approve or reject a proposal (with qualifiedVerification for protected tasks) |
 | GET | `/api/workspaces/:ws/shift` | Get shift state |
 | PUT | `/api/workspaces/:ws/shift` | Clock in/out |
 | GET | `/api/workspaces/:ws/handover` | Get handover |
@@ -117,7 +129,7 @@ Tasks in **repairs**, **purchases**, or **safety** categories automatically get 
 
 ```bash
 npm run check          # Syntax-check all JS files
-npm run test:backend   # Run backend integration tests (17 tests)
+npm run test:backend   # Run backend integration tests (19 tests)
 npm run seed           # Re-seed the database
 npm run mcp            # Start MCP server (for manual testing)
 ```
@@ -137,8 +149,8 @@ npm run mcp            # Start MCP server (for manual testing)
 │   ├── db.js              # SQLite schema and row mappers (includes ai_proposals table)
 │   ├── seed.js            # Initial demo data seeding
 │   ├── rule-defaults.js   # Shared rule definitions (locked: repairs, purchases, safety)
-│   ├── mcp-server.js      # MCP server (stdio transport, 5 tools for Silent AI agent)
-│   ├── test.js            # 17 backend integration tests
+│   ├── mcp-server.js      # MCP server (official SDK, stdio transport, 8 tools)
+│   ├── test.js            # 19 backend integration tests
 │   └── shiftbridge.db     # SQLite database (auto-created, gitignored)
 └── assets/
     └── mark.svg            # ShiftBridge logo
@@ -149,4 +161,5 @@ npm run mcp            # Start MCP server (for manual testing)
 1. **No authentication** — demo identities are simulated and not secure
 2. **No file uploads** — photo attachment button shows a notice
 3. **LAN-only** — do not expose this backend to the public internet
-4. **Safety-sensitive work** — equipment repairs, spending, and safety certification are never silently authorized; server-side enforcement redirects `done` → `review` for protected tasks
+4. **Safety-sensitive work** — equipment repairs, spending, and safety certification are never silently authorized; server-side enforcement redirects `done` → `review` for protected tasks, and manager approval of completion reviews requires explicit qualified verification evidence to mark tasks done
+5. **MCP connector trust** — the ShiftBridge MCP connector must be manually trusted in WorkBuddy Desktop before it can be invoked from chat
