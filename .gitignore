@@ -6,10 +6,10 @@ preview-test.html
 *-chat-test.png
 *-manage-test.png
 
-# SQLite database files
-server/shiftbridge.db
-server/shiftbridge.db-shm
-server/shiftbridge.db-wal
+# SQLite database files (live, backup, and test)
+server/*.db
+server/*.db-shm
+server/*.db-wal
 
 # WorkBuddy AI project data
 .workbuddy-ai/
