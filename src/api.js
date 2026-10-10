@@ -1,0 +1,89 @@
+/**
+ * src/api.js — API client for ShiftBridge backend.
+ *
+ * All functions return Promises. Uses relative /api endpoints so the
+ * frontend works from any host (localhost or laptop IP on the LAN).
+ *
+ * No authentication — this is a hackathon demo. Demo identity is passed
+ * as `userId` in request bodies or query params.
+ */
+
+const BASE = '/api';
+
+/** Generic fetch wrapper with JSON handling. */
+async function request(method, path, body = null) {
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body !== null) opts.body = JSON.stringify(body);
+  const res = await fetch(`${BASE}${path}`, opts);
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text }; }
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+const api = {
+  // ── People ────────────────────────────────────────────────────────
+  getPeople: () => request('GET', '/people'),
+
+  // ── Workspaces ─────────────────────────────────────────────────────
+  getWorkspaces: () => request('GET', '/workspaces'),
+  createWorkspace: (data) => request('POST', '/workspaces', data),
+  updateWorkspace: (id, data) => request('PUT', `/workspaces/${id}`, data),
+
+  // ── Messages ──────────────────────────────────────────────────────
+  getMessages: (ws, since = 0) => request('GET', `/workspaces/${ws}/messages?since=${since}`),
+  sendMessage: (ws, { id, user, body }) =>
+    request('POST', `/workspaces/${ws}/messages`, { id, user, body }),
+
+  // ── Tasks ─────────────────────────────────────────────────────────
+  getTasks: (ws) => request('GET', `/workspaces/${ws}/tasks`),
+  getTask: (id) => request('GET', `/tasks/${id}`),
+  createTask: (ws, data) => request('POST', `/workspaces/${ws}/tasks`, data),
+  updateTask: (id, data) => request('PUT', `/tasks/${id}`, data),
+
+  // ── Issues ────────────────────────────────────────────────────────
+  getIssues: (ws) => request('GET', `/workspaces/${ws}/issues`),
+  getIssue: (id) => request('GET', `/issues/${id}`),
+  updateIssue: (id, data) => request('PUT', `/issues/${id}`, data),
+
+  // ── Rules ─────────────────────────────────────────────────────────
+  updateRule: (id, allowed) => request('PUT', `/rules/${id}`, { allowed }),
+
+  // ── Shifts ────────────────────────────────────────────────────────
+  getShift: (ws) => request('GET', `/workspaces/${ws}/shift`),
+  toggleShift: (ws, personId) => request('PUT', `/workspaces/${ws}/shift`, { personId }),
+
+  // ── Handovers ─────────────────────────────────────────────────────
+  getHandover: (ws) => request('GET', `/workspaces/${ws}/handover`),
+  saveHandover: (ws, data) => request('PUT', `/workspaces/${ws}/handover`, data),
+
+  // ── Audit log ─────────────────────────────────────────────────────
+  getAudit: (ws, since = 0) => request('GET', `/workspaces/${ws}/audit?since=${since}`),
+
+  // ── Sync ──────────────────────────────────────────────────────────
+  sync: (ws, revision = 0) => request('GET', `/sync?workspace=${ws}&revision=${revision}`),
+  health: () => request('GET', '/health'),
+
+  // ── Reset ─────────────────────────────────────────────────────────
+  reset: () => request('POST', '/reset'),
+
+  // ── SSE ───────────────────────────────────────────────────────────
+  /**
+   * Open an SSE connection for a workspace. Calls onEvent(payload) for each update.
+   * Returns a cleanup function to close the connection.
+   */
+  openEvents(workspaceId, onEvent) {
+    const es = new EventSource(`${BASE}/events?workspace=${encodeURIComponent(workspaceId)}`);
+    es.addEventListener('update', (e) => {
+      try { onEvent(JSON.parse(e.data)); } catch { /* ignore parse errors */ }
+    });
+    es.onerror = () => { /* SSE auto-reconnects; ignore transient errors */ };
+    return () => es.close();
+  },
+};
+
+export { api };

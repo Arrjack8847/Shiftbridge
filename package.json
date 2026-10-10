@@ -1,13 +1,22 @@
 {
-  "name": "shiftbridge-chat-first-frontend",
-  "version": "0.1.0",
+  "name": "shiftbridge",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "A dependency-free, responsive ShiftBridge frontend prototype",
+  "description": "ShiftBridge — shared backend for multi-device team chat and task management",
   "scripts": {
-    "dev": "node scripts/serve.mjs",
-    "start": "node scripts/serve.mjs",
-    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check scripts/serve.mjs"
+    "dev": "node server/index.js",
+    "start": "node server/index.js",
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js",
+    "test:backend": "node server/test.js",
+    "seed": "node server/seed.js"
   },
-  "engines": {"node": ">=18"}
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "cors": "^2.8.6",
+    "express": "^5.3.0"
+  }
 }

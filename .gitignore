@@ -5,3 +5,8 @@ node_modules/
 preview-test.html
 *-chat-test.png
 *-manage-test.png
+
+# SQLite database files
+server/shiftbridge.db
+server/shiftbridge.db-shm
+server/shiftbridge.db-wal
