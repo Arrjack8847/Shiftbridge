@@ -1,15 +1,28 @@
+# Dependencies
 node_modules/
-.DS_Store
+
+# Environment files (contains secrets — never commit)
+.env
+.env.local
+.env.*.local
+
+# Database (SQLite — runtime data, not source)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
 *.log
-.env*
-preview-test.html
-*-chat-test.png
-*-manage-test.png
+npm-debug.log*
 
-# SQLite database files (live, backup, and test)
-server/*.db
-server/*.db-shm
-server/*.db-wal
+# OS files
+.DS_Store
+Thumbs.db
 
-# WorkBuddy AI project data
-.workbuddy-ai/
+# IDE
+.vscode/
+.idea/
+
+# Tool results (temp)
+tool-results/

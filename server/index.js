@@ -37,7 +37,42 @@ import {
 } from './db.js';
 import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
-import { processMessage as groqProcessMessage, processPendingJobs, getGroqStatus } from './groq-agent.js';
+// ── AI Provider Selection ───────────────────────────────────────────
+// AI_PROVIDER controls which AI backend is used:
+//   "tencent-local" (default) → Tencent AI via CodeBuddy serve + MCP tools
+//   "groq"                    → Legacy Groq API (code preserved in git)
+//
+// Groq code is kept in groq-agent.js and git history. When tencent-local
+// is active, groq-agent.js is imported only for backward-compatible status.
+import {
+  processMessage as tencentProcessMessage,
+  processPendingJobs as tencentProcessPending,
+  getTencentStatus,
+} from './tencent-agent.js';
+
+// Legacy Groq agent — only loaded for backward-compatible status endpoint
+// and the AI_PROVIDER=groq fallback path. Active code is tencent-agent.js.
+import {
+  processMessage as groqProcessMessage,
+  processPendingJobs as groqProcessPending,
+  getGroqStatus,
+} from './groq-agent.js';
+
+// Provider-agnostic dispatch (Phase D — prevent dual AI systems)
+const AI_PROVIDER = process.env.AI_PROVIDER || 'tencent-local';
+function dispatchProcessMessage(workspaceId, messageId, user, body) {
+  if (AI_PROVIDER === 'groq') {
+    // Legacy path — only used when AI_PROVIDER=groq is explicitly set
+    return groqProcessMessage(workspaceId, messageId, user, body);
+  }
+  return tencentProcessMessage(workspaceId, messageId, user, body);
+}
+async function dispatchProcessPending() {
+  if (AI_PROVIDER === 'groq') {
+    return groqProcessPending();
+  }
+  return tencentProcessPending();
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..'); // project root (parent of server/)
@@ -278,15 +313,18 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
     bumpRevision();
     notifySSE(req.workspaceId, { type: 'message', id: msgId, user, body: text.slice(0, 1500), at: ts });
 
-    // ── Groq AI: fire async processing (non-blocking) ────────────
+    // ── AI Processing: fire async (non-blocking) ───────────────────
     // The response is sent immediately — chat is never blocked.
-    // The agent fetches context, calls Groq API, executes actions,
-    // and SSE pushes updates to all clients when done.
+    // dispatchProcessMessage selects tencent-agent or groq-agent
+    // based on AI_PROVIDER env var (default: tencent-local).
+    // The agent fetches context, triggers the AI, executes actions
+    // via MCP tools (Tencent) or JSON API (Groq), and SSE pushes
+    // updates to all clients when done.
     setImmediate(() => {
-      groqProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
+      dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
         .then(result => {
           if (result.ok) {
-            console.log(`[groq-ai] Processed message ${msgId}: ${result.actions?.length || 0} actions, ${result.latency}ms`);
+            console.log(`[${AI_PROVIDER}] Processed message ${msgId}: ${result.actions?.length || 0} actions, ${result.latency}ms`);
             notifySSE(req.workspaceId, {
               type: 'ai_processed',
               messageId: msgId,
@@ -295,10 +333,10 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
               latency: result.latency,
             });
           } else if (!result.skipped) {
-            console.error(`[groq-ai] Failed for ${msgId}: ${result.error} (willRetry: ${result.willRetry})`);
+            console.error(`[${AI_PROVIDER}] Failed for ${msgId}: ${result.error} (willRetry: ${result.willRetry})`);
           }
         })
-        .catch(err => console.error('[groq-ai] Unexpected error:', err.message));
+        .catch(err => console.error(`[${AI_PROVIDER}] Unexpected error:`, err.message));
     });
   }
 
@@ -1176,19 +1214,121 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
   res.status(201).json(mapAIAnalysisLog(row));
 });
 
-// ── Groq AI Integration Endpoints ────────────────────────────────────
+// ── AI Integration Endpoints ─────────────────────────────────────────
 //
-// GET  /api/workspaces/:workspace/groq-status — Groq agent status (jobs, latency, model)
-// POST /api/groq/retry-pending                — Recovery: retry failed/pending jobs
+// Tencent AI (default provider):
+//   GET  /api/workspaces/:workspace/tencent-status — Tencent agent status
+//   POST /api/tencent/retry-pending                — Recovery: retry pending jobs
+//
+// Legacy Groq AI (backward compat, disabled when AI_PROVIDER=tencent-local):
+//   GET  /api/workspaces/:workspace/groq-status    — Groq agent status
+//   POST /api/groq/retry-pending                   — Recovery: retry pending jobs
 
-/** GET /api/workspaces/:workspace/groq-status — Groq agent monitoring. */
+/** GET /api/workspaces/:workspace/tencent-status — Tencent agent monitoring. */
+app.get('/api/workspaces/:workspace/tencent-status', validateWorkspace, (req, res) => {
+  res.json(getTencentStatus(req.workspaceId));
+});
+
+/** POST /api/tencent/retry-pending — recovery endpoint for failed/pending jobs. */
+app.post('/api/tencent/retry-pending', async (_req, res) => {
+  const result = await dispatchProcessPending();
+  res.json(result);
+});
+
+// ── WorkBuddy Automation Path (Phase D supplement) ──────────────────
+//
+// When CodeBuddy serve is not available, pending AI jobs can be
+// processed by the WorkBuddy Desktop AI session via MCP tools.
+// The hourly automation sends a prompt to the AI, which:
+//   1. Calls GET /api/tencent/pending-jobs to fetch unprocessed jobs
+//   2. Reads each message and analyzes it
+//   3. Uses MCP tools (create_manager_task, propose_completion, etc.)
+//      to take real actions in the ShiftBridge database
+//   4. Calls POST /api/tencent/jobs/:jobId/complete to mark each job
+//      as completed with the actions taken
+//
+// This is the GENUINE Tencent AI processing path — the WorkBuddy AI
+// (running in an authenticated Tencent session) processes messages
+// directly via MCP tools, not simulated.
+
+/** GET /api/tencent/pending-jobs — fetch pending AI jobs with message context. */
+app.get('/api/tencent/pending-jobs', (_req, res) => {
+  const d = getDB();
+  const jobs = d.prepare(
+    `SELECT j.id as jobId, j.workspace_id, j.message_id, j.status, j.attempts,
+            j.created_at, m.user_id as messageUser, m.body as messageBody, m.seq as messageSeq
+     FROM ai_jobs j
+     LEFT JOIN messages m ON m.id = j.message_id
+     WHERE j.status = 'pending' AND j.attempts < j.max_attempts
+     ORDER BY j.created_at ASC
+     LIMIT 20`
+  ).all();
+
+  res.json({ pendingJobs: jobs, count: jobs.length });
+});
+
+/** POST /api/tencent/jobs/:jobId/complete — mark a job completed after MCP tool processing. */
+app.post('/api/tencent/jobs/:jobId/complete', (req, res) => {
+  const { jobId } = req.params;
+  const { actions, analysis, model } = req.body;
+  const d = getDB();
+  const ts = Date.now();
+
+  const job = d.prepare('SELECT * FROM ai_jobs WHERE id = ?').get(jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  // Update job to completed
+  d.prepare(
+    `UPDATE ai_jobs SET status = 'completed', last_error = '',
+     actions_json = ?, latency_ms = ?, model_used = ?,
+     completed_at = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    JSON.stringify(actions || []),
+    Date.now() - job.created_at,
+    model || 'tencent-workbuddy-mcp',
+    ts, ts, jobId,
+  );
+
+  // Log to ai_analysis_log
+  const logId = `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const proposalsCreated = (actions || []).filter(a => a.type === 'create_manager_task' && a.ok).length;
+  const completionClaims = (actions || []).filter(a => a.type === 'propose_completion' && a.ok).length;
+  const errors = (actions || []).filter(a => !a.ok).map(a => `${a.type}: ${a.error || 'failed'}`).join('; ');
+
+  d.prepare(
+    `INSERT INTO ai_analysis_log (id, workspace_id, run_at, messages_total, messages_new,
+     proposals_created, completion_claims, errors, last_message_seq, status, summary, created_at)
+     VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, 'success', ?, ?)`,
+  ).run(
+    logId, job.workspace_id, ts, proposalsCreated, completionClaims,
+    errors, req.body.messageSeq || 0,
+    `Tencent AI (WorkBuddy MCP): ${analysis || 'Processed via MCP tools'} | Actions: ${(actions || []).length}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(job.workspace_id, {
+    type: 'ai_processed',
+    messageId: job.message_id,
+    actions: (actions || []).length,
+    analysis: (analysis || '').slice(0, 200),
+    latency: Date.now() - job.created_at,
+  });
+
+  res.json({ ok: true, jobId, status: 'completed', actions: actions || [] });
+});
+
+/** GET /api/workspaces/:workspace/groq-status — Legacy Groq agent monitoring. */
 app.get('/api/workspaces/:workspace/groq-status', validateWorkspace, (req, res) => {
   res.json(getGroqStatus(req.workspaceId));
 });
 
-/** POST /api/groq/retry-pending — recovery endpoint for failed/pending jobs. */
+/** POST /api/groq/retry-pending — legacy recovery endpoint (kept for backward compat). */
 app.post('/api/groq/retry-pending', async (_req, res) => {
-  const result = await processPendingJobs();
+  const result = await dispatchProcessPending();
   res.json(result);
 });
 
@@ -1978,6 +2118,43 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ error: 'Internal server error', detail: err.message });
 });
 
+// ── AI Provider Fast-Poll Loop ──────────────────────────────────────
+//
+// Checks for pending AI jobs every 30 seconds and processes them.
+// This provides ~30s recovery latency instead of relying solely on
+// the hourly automation. Combined with the instant setImmediate()
+// trigger on new messages, this gives us:
+//   • Instant attempt: setImmediate → processMessage (if CodeBuddy
+//     serve is available, <10s; if not, job goes to pending)
+//   • Fast recovery: 30s poll → processPending (catches any jobs
+//     that couldn't be processed instantly)
+//   • Hourly backup: automation → /api/tencent/retry-pending
+const AI_POLL_INTERVAL_MS = 30_000; // 30 seconds
+let aiPollRunning = false;
+
+setInterval(async () => {
+  if (aiPollRunning) return; // Prevent overlapping polls
+  aiPollRunning = true;
+  try {
+    const d = getDB();
+    const pendingCount = d.prepare(
+      `SELECT COUNT(*) as count FROM ai_jobs WHERE status = 'pending' AND attempts < max_attempts`,
+    ).get()?.count || 0;
+    if (pendingCount > 0) {
+      console.log(`[ai-poll] Found ${pendingCount} pending job(s), attempting recovery...`);
+      const result = await dispatchProcessPending();
+      if (result.processed > 0) {
+        console.log(`[ai-poll] Processed ${result.processed} job(s), failed: ${result.failed || 0}`);
+      }
+    }
+  } catch (err) {
+    // Silent — don't crash the server on poll errors
+    console.error('[ai-poll] Error:', err.message);
+  } finally {
+    aiPollRunning = false;
+  }
+}, AI_POLL_INTERVAL_MS);
+
 // ── Start ───────────────────────────────────────────────────────────
 const server = app.listen(PORT, HOST, () => {
   console.log(`\n  ShiftBridge backend running on http://${HOST}:${PORT}`);
@@ -1998,7 +2175,9 @@ const server = app.listen(PORT, HOST, () => {
     }
   } catch { /* ignore */ }
   console.log(`\n  API:       http://${HOST}:${PORT}/api/workspaces`);
-  console.log(`  SSE:       http://${HOST}:${PORT}/api/events?workspace=daily\n`);
+  console.log(`  SSE:       http://${HOST}:${PORT}/api/events?workspace=daily`);
+  console.log(`  AI:        provider=${AI_PROVIDER}, poll=30s${AI_PROVIDER === 'tencent-local' ? ', CodeBuddy serve=' + (process.env.CODEBUDDY_SERVE_URL || 'http://127.0.0.1:8080') : ''}`);
+  console.log('');
 });
 
 // Graceful shutdown.

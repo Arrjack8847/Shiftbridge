@@ -584,8 +584,8 @@ async function create_manager_task(args) {
 
   try {
     const result = await apiRequest('POST', `/workspaces/${workspace}/manager-task`, {
-      messageId,
-      taskName,
+      sourceMessageId: messageId,
+      name: taskName,
       assignee,
       due,
       category,
