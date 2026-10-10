@@ -8,11 +8,46 @@
  *   4. Workspace isolation (messages in one workspace don't leak to another)
  *   5. Idempotency (duplicate message IDs don't create duplicates)
  *
+ * Uses an ISOLATED TEST DATABASE (server/test-backend.db) — never touches
+ * the live demo database at server/shiftbridge.db.
+ *
  * Run:  npm run test:backend
  */
 
-import { getDB, initSchema, closeDB } from './db.js';
-import { seedDatabase } from './seed.js';
+// ── Isolated test database ──────────────────────────────────────────
+// Set the env var BEFORE importing db.js so the module picks up the
+// test path. ES module evaluation is deferred until the dynamic import
+// resolves, so the env var is set first.
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { existsSync, rmSync } from 'node:fs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const LIVE_DB = resolve(__dirname, 'shiftbridge.db');
+const TEST_DB = resolve(__dirname, 'test-backend.db');
+
+// ── Safeguard: refuse to run against the live database ──────────────
+// If SHIFTBRIDGE_DB_PATH is already set to the live database path,
+// abort immediately to prevent data destruction.
+if (process.env.SHIFTBRIDGE_DB_PATH && resolve(process.env.SHIFTBRIDGE_DB_PATH) === LIVE_DB) {
+  console.error('\n  FATAL: Refusing to run tests against the live database at:');
+  console.error(`  ${LIVE_DB}\n`);
+  process.exit(2);
+}
+
+// Clean up any previous test database.
+if (existsSync(TEST_DB)) {
+  rmSync(TEST_DB);
+  if (existsSync(TEST_DB + '-wal')) rmSync(TEST_DB + '-wal');
+  if (existsSync(TEST_DB + '-shm')) rmSync(TEST_DB + '-shm');
+}
+
+process.env.SHIFTBRIDGE_DB_PATH = TEST_DB;
+
+// Now dynamically import — db.js reads SHIFTBRIDGE_DB_PATH at eval time.
+const db = await import('./db.js');
+const { getDB, initSchema, closeDB } = db;
+const { seedDatabase } = await import('./seed.js');
 
 let passed = 0;
 let failed = 0;
@@ -46,6 +81,11 @@ function assertEqual(actual, expected, message) {
 
 function resetAndSeed() {
   const d = getDB();
+  // Runtime safeguard: verify we are NOT on the live database.
+  const dbInfo = d.prepare('PRAGMA database_list').get();
+  if (dbInfo.file && resolve(dbInfo.file) === LIVE_DB) {
+    throw new Error(`FATAL: Refusing to reset the live database at ${dbInfo.file}`);
+  }
   // Wipe all data.
   d.exec(`
     DELETE FROM ai_proposals;
@@ -473,4 +513,8 @@ async function runTests() {
 initSchema();
 runTests().finally(() => {
   closeDB();
+  // Clean up test database.
+  if (existsSync(TEST_DB)) rmSync(TEST_DB);
+  if (existsSync(TEST_DB + '-wal')) rmSync(TEST_DB + '-wal');
+  if (existsSync(TEST_DB + '-shm')) rmSync(TEST_DB + '-shm');
 });

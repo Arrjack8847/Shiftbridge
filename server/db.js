@@ -233,6 +233,135 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_ai_log_ws ON ai_analysis_log(workspace_id, run_at);
   `);
 
+  // ── Phase 5.1 Migration: add source_message_id to ai_proposals ────
+  // This column tracks which chat message a proposal was derived from,
+  // enabling deduplication: the AI should not create duplicate proposals
+  // for the same message + type + intent across repeated analysis runs.
+  // The unique index enforces this at the database level as a backstop
+  // to the application-level check in POST /api/.../proposals.
+  {
+    const cols = d.prepare("PRAGMA table_info(ai_proposals)").all();
+    const hasSourceMsgId = cols.some((c) => c.name === 'source_message_id');
+    if (!hasSourceMsgId) {
+      d.exec('ALTER TABLE ai_proposals ADD COLUMN source_message_id TEXT');
+    }
+    // Unique index: prevents duplicate proposals from the same source
+    // message with the same type and summary. Only applies when
+    // source_message_id is not null (manual/legacy proposals are exempt).
+    d.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_dedup
+      ON ai_proposals(workspace_id, source_message_id, type, summary)
+      WHERE source_message_id IS NOT NULL
+    `);
+  }
+
+  // ── Phase 5.1 Migration: add processing_errors to ai_analysis_log ─
+  // This column stores a JSON array of per-message processing errors,
+  // serving as a quarantine record for failed messages. Each entry has
+  // { messageId, seq, error, timestamp }. The checkpoint advances past
+  // both successful and failed messages, so failed messages don't block
+  // the queue — they're recorded for later review or retry.
+  {
+    const logCols = d.prepare("PRAGMA table_info(ai_analysis_log)").all();
+    const hasProcessingErrors = logCols.some((c) => c.name === 'processing_errors');
+    if (!hasProcessingErrors) {
+      d.exec("ALTER TABLE ai_analysis_log ADD COLUMN processing_errors TEXT DEFAULT '[]'");
+    }
+  }
+
+  // ── Phase 6: Announcements, Issues, and Direct Task Assignment ───
+
+  // Announcements table: manager-published notices and AI-generated drafts.
+  // status: 'draft' (unpublished, AI or manager created) → 'active' (published)
+  //         → 'archived' (withdrawn/resolved).
+  // type: 'general' | 'important' | 'safety'.
+  // linked_issue_id: optional reference to an issues row when the announcement
+  //   was created in response to a flagged issue (e.g., equipment warning).
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS announcements (
+      id              TEXT PRIMARY KEY,
+      workspace_id    TEXT NOT NULL,
+      title           TEXT NOT NULL,
+      body            TEXT NOT NULL,
+      type            TEXT NOT NULL DEFAULT 'general',
+      status          TEXT NOT NULL DEFAULT 'draft',
+      publisher_id    TEXT,
+      linked_issue_id TEXT,
+      created_by      TEXT NOT NULL DEFAULT 'demo',
+      created_at      INTEGER NOT NULL,
+      published_at    INTEGER,
+      archived_at     INTEGER,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_announcements_ws ON announcements(workspace_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_announcements_issue ON announcements(linked_issue_id);
+  `);
+
+  // Announcement revision history: every edit to a published announcement
+  // is recorded here so safety instructions are never silently overwritten.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS announcement_revisions (
+      id              TEXT PRIMARY KEY,
+      announcement_id TEXT NOT NULL,
+      old_title       TEXT,
+      new_title       TEXT,
+      old_body        TEXT,
+      new_body        TEXT,
+      editor_id       TEXT NOT NULL,
+      edited_at       INTEGER NOT NULL,
+      FOREIGN KEY (announcement_id) REFERENCES announcements(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_revisions_ann ON announcement_revisions(announcement_id, edited_at);
+  `);
+
+  // Employee acknowledgments: one per employee per announcement.
+  // The PRIMARY KEY enforces uniqueness — repeated acks are idempotent.
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS announcement_acknowledgments (
+      announcement_id TEXT NOT NULL,
+      person_id       TEXT NOT NULL,
+      acknowledged_at INTEGER NOT NULL,
+      PRIMARY KEY (announcement_id, person_id),
+      FOREIGN KEY (announcement_id) REFERENCES announcements(id) ON DELETE CASCADE
+    );
+  `);
+
+  // ── Phase 6 Migration: extend issues table ─────────────────────
+  // Add columns for employee-reported issues, linked announcements, and
+  // qualified clearance tracking. The existing `source` column already
+  // stores a message ID, so we reuse it for dedup rather than adding
+  // a separate source_message_id column.
+  {
+    const issueCols = d.prepare("PRAGMA table_info(issues)").all();
+    const has = (name) => issueCols.some((c) => c.name === name);
+
+    if (!has('reporter_id')) d.exec("ALTER TABLE issues ADD COLUMN reporter_id TEXT");
+    if (!has('linked_announcement_id')) d.exec("ALTER TABLE issues ADD COLUMN linked_announcement_id TEXT");
+    if (!has('qualified_verifier')) d.exec("ALTER TABLE issues ADD COLUMN qualified_verifier TEXT");
+    if (!has('verification_evidence')) d.exec("ALTER TABLE issues ADD COLUMN verification_evidence TEXT");
+    if (!has('verified_at')) d.exec("ALTER TABLE issues ADD COLUMN verified_at INTEGER");
+    if (!has('issue_type')) d.exec("ALTER TABLE issues ADD COLUMN issue_type TEXT DEFAULT 'general'");
+  }
+
+  // Unique index on issues: prevents duplicate issues from the same source
+  // message within the same workspace. Allows issues without a source.
+  d.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_msg_dedup
+    ON issues(workspace_id, source)
+    WHERE source IS NOT NULL
+  `);
+
+  // ── Phase 6 Migration: task dedup for direct manager assignments ─
+  // The existing `source` column on tasks already stores a message ID.
+  // This unique index prevents duplicate tasks from the same source
+  // message with the same name, while allowing multiple distinct tasks
+  // from the same message (different names) and manual tasks (null source).
+  d.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source_dedup
+    ON tasks(workspace_id, source, name)
+    WHERE source IS NOT NULL
+  `);
+
   // Initialize revision counter if not present.
   const row = d.prepare('SELECT value FROM meta WHERE key = ?').get('revision');
   if (!row) {
@@ -309,12 +438,18 @@ export function mapIssue(row) {
     description: row.description || '',
     severity: row.severity,
     status: row.status,
-    source: row.source,
+    source: row.source || null,
     createdBy: row.created_by,
+    reporterId: row.reporter_id || null,
     requiresApproval: row.requires_approval === 1,
     approved: row.approved === 1,
     evidence: row.evidence || '',
     resolvedAt: row.resolved_at,
+    linkedAnnouncementId: row.linked_announcement_id || null,
+    qualifiedVerifier: row.qualified_verifier || null,
+    verificationEvidence: row.verification_evidence || null,
+    verifiedAt: row.verified_at || null,
+    issueType: row.issue_type || 'general',
     createdAt: row.created_at,
   };
 }
@@ -360,6 +495,7 @@ export function mapProposal(row) {
     confidence: row.confidence,
     status: row.status,
     proposedData,
+    sourceMessageId: row.source_message_id || null,
     reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at,
     createdAt: row.created_at,
@@ -384,6 +520,8 @@ export function mapCompletionClaim(row) {
 
 export function mapAIAnalysisLog(row) {
   if (!row) return null;
+  let processingErrors = [];
+  try { processingErrors = JSON.parse(row.processing_errors || '[]'); } catch { /* keep default */ }
   return {
     id: row.id,
     ws: row.workspace_id,
@@ -396,6 +534,66 @@ export function mapAIAnalysisLog(row) {
     lastMessageSeq: row.last_message_seq,
     status: row.status,
     summary: row.summary || '',
+    processingErrors,
+    createdAt: row.created_at,
+  };
+}
+
+// ── Phase 6 mappers ────────────────────────────────────────────────
+
+export function mapAnnouncement(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ws: row.workspace_id,
+    title: row.title,
+    body: row.body,
+    type: row.type,
+    status: row.status,
+    publisherId: row.publisher_id || null,
+    linkedIssueId: row.linked_issue_id || null,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    publishedAt: row.published_at || null,
+    archivedAt: row.archived_at || null,
+  };
+}
+
+export function mapAnnouncementRevision(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    announcementId: row.announcement_id,
+    oldTitle: row.old_title || '',
+    newTitle: row.new_title || '',
+    oldBody: row.old_body || '',
+    newBody: row.new_body || '',
+    editorId: row.editor_id,
+    editedAt: row.edited_at,
+  };
+}
+
+export function mapIssueExtended(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ws: row.workspace_id,
+    title: row.title,
+    description: row.description || '',
+    severity: row.severity,
+    status: row.status,
+    source: row.source || null,
+    createdBy: row.created_by,
+    reporterId: row.reporter_id || null,
+    requiresApproval: row.requires_approval === 1,
+    approved: row.approved === 1,
+    evidence: row.evidence || '',
+    resolvedAt: row.resolved_at,
+    linkedAnnouncementId: row.linked_announcement_id || null,
+    qualifiedVerifier: row.qualified_verifier || null,
+    verificationEvidence: row.verification_evidence || null,
+    verifiedAt: row.verified_at || null,
+    issueType: row.issue_type || 'general',
     createdAt: row.created_at,
   };
 }

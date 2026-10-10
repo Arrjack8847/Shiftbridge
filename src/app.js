@@ -34,6 +34,7 @@ let data = {
   issues: [],
   proposals: [],
   completionClaims: [],
+  announcements: [],
   aiStatus: null,
   shifts: {},
   handovers: {},
@@ -50,6 +51,9 @@ let toast = '';
 let openWorkspaces = false;
 let activeDialog = '';
 let pendingIssueId = null;
+let flagMsgId = null;       // message being flagged as issue
+let pendingAnnouncementDraft = null; // AI-suggested draft for compose dialog
+let pendingAnnouncementId = null; // announcement being edited
 let lastRoute = '';
 
 const app = document.querySelector('#app');
@@ -94,7 +98,12 @@ function taskDetail(id) {
 
 function chatScreen() {
   const messages = wsItems(data.messages).sort((a, b) => a.at - b.at);
-  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header><div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected.</div><div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId; return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p><div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team" required/><button type="submit" class="send-button" aria-label="Send message">${icon('send', 18)}</button></form><input id="fileInput" type="file" accept="image/*" hidden/></div></div>`;
+  const activeAnnouncements = wsItems(data.announcements).filter((a) => a.status === 'published' && !a.archivedAt);
+  const pinnedHtml = activeAnnouncements.length ? `<div class="pinned-notices">${activeAnnouncements.map((a) => {
+    const acked = (a.acknowledgments || []).some((ack) => ack.personId === identity?.userId);
+    return `<button class="pinned-notice ${a.type === 'safety' ? 'safety' : ''}" data-nav="announcement/${encodeURIComponent(a.id)}"><span class="pin-icon">${icon('pin', 14)}</span><div class="grow"><strong>${e(a.title)}</strong><small>${a.type === 'safety' ? 'Safety notice' : 'Notice'} · ${acked ? 'Acknowledged' : 'Tap to acknowledge'}</small></div>${icon('chevron', 15)}</button>`;
+  }).join('')}</div>` : '';
+  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header>${pinnedHtml}<div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected. Long-press or tap the dots to flag a message as an issue.</div><div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId; return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p><div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div><button class="msg-dots-btn" data-action="flag-message" data-id="${e(m.id)}" aria-label="Flag this message">${icon('dots', 16)}</button></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team" required/><button type="submit" class="send-button" aria-label="Send message">${icon('send', 18)}</button></form><input id="fileInput" type="file" accept="image/*" hidden/></div></div>`;
 }
 
 function shiftScreen() {
@@ -112,7 +121,7 @@ function profileScreen() {
   return `<section class="surface-page">${pageHeading('Profile & Workspaces', 'Your account preferences')}<div class="card"><div class="account-head">${personAvatar(identity?.userId, true)}<div><h2 style="margin:0 0 5px">${e(member(identity?.userId).name)}</h2><span class="muted small">${admin() ? 'Workspace administrator' : 'Team employee'} · Demo profile</span></div></div><div class="field-group"><label>Demo identity</label><p class="field-help">You are signed in as <strong>${e(member(identity?.userId).name)}</strong>. This is a simulated identity for the hackathon demo — it is <strong>not secure authentication</strong>.</p><button class="btn outline full" data-action="switch-identity">Switch demo identity</button></div></div><div class="section-title">My Workspaces</div><div class="card inline-list">${data.workspaces.map((w) => `<button class="list-row" data-action="switch-workspace" data-id="${e(w.id)}">${icon('coffee', 20)}<span class="grow"><strong>${e(w.name)}</strong><p>${e(w.type)}</p></span>${w.id === currentWorkspace ? icon('check', 19) : icon('chevron', 19)}</button>`).join('')}<button class="list-row" data-nav="workspace/create">${icon('plus')}<span class="grow"><strong>Create another workspace</strong></span>${icon('chevron', 17)}</button></div>${admin() ? `<div class="section-title">Administration</div><div class="card inline-list"><button class="list-row" data-nav="manage">${icon('manage')}<span class="grow"><strong>Manage ${e(workspace()?.name || '')}</strong><p>Issues, team, invites and AI settings</p></span>${icon('chevron', 17)}</button></div>` : ''}<p class="footer-note">Shared data is stored on the backend server. Your demo identity is stored locally on this device only.</p><button class="btn outline full" data-action="reset-demo">Reset demo data</button></section>`;
 }
 
-const managePages = [['attention', 'Needs Attention', 'alert', 'Review problems and approvals'], ['proposals', 'Silent AI Proposals', 'spark', 'AI-suggested tasks and reviews'], ['all-work', 'All Work', 'tasks', 'View every task and issue'], ['team', 'Team & Shifts', 'users', 'Members, roles and shift coverage'], ['invites', 'Invite Team', 'link', 'Invite employees to this workspace'], ['rules', 'AI & Rules', 'spark', 'Choose what AI may assign'], ['settings', 'Workspace Settings', 'settings', 'Business details and preferences']];
+const managePages = [['attention', 'Needs Attention', 'alert', 'Review problems and approvals'], ['announcements', 'Announcements', 'megaphone', 'Publish notices and pinned alerts'], ['proposals', 'Silent AI Proposals', 'spark', 'AI-suggested tasks and reviews'], ['all-work', 'All Work', 'tasks', 'View every task and issue'], ['team', 'Team & Shifts', 'users', 'Members, roles and shift coverage'], ['invites', 'Invite Team', 'link', 'Invite employees to this workspace'], ['rules', 'AI & Rules', 'spark', 'Choose what AI may assign'], ['settings', 'Workspace Settings', 'settings', 'Business details and preferences']];
 
 /** Render a single proposal card with evidence, reasoning, and approve/reject buttons. */
 function proposalCard(p) {
@@ -126,19 +135,20 @@ function proposalCard(p) {
 
 function manageHome() {
   const pendingProposals = wsItems(data.proposals).filter((p) => p.status === 'pending');
+  const activeAnnouncements = wsItems(data.announcements).filter((a) => a.status === 'published' && !a.archivedAt);
   const ai = data.aiStatus;
   const aiLatest = ai?.latest;
   const aiAgg = ai?.aggregates;
   const aiStalled = ai?.stalled;
   const aiLastRun = aiLatest?.runAt ? displayTime(aiLatest.runAt) : 'Never';
   const aiCard = ai ? `<div class="card ai-monitor-card"><div class="row between"><div class="eyebrow">${icon('spark', 16)} SILENT AI MONITORING</div>${aiStalled ? badge('STALLED', 'red') : aiLatest ? badge('ACTIVE', '') : badge('NOT RUN', 'gray')}</div><div class="metric-grid" style="margin-top:12px"><div class="metric"><small>Last analysis</small><b style="font-size:13px">${e(aiLastRun)}</b></div><div class="metric"><small>Messages analyzed</small><b>${aiAgg?.totalMessagesAnalyzed || 0}</b></div><div class="metric"><small>Proposals created</small><b>${aiAgg?.totalProposalsCreated || 0}</b></div><div class="metric"><small>Completion claims</small><b>${aiAgg?.totalCompletionClaims || 0}</b></div></div>${aiLatest?.errors ? `<div class="alert-panel" style="margin-top:10px;padding:8px 12px;font-size:13px">${icon('alert', 14)} ${e(aiLatest.errors.slice(0, 150))}</div>` : ''}${aiLatest?.summary ? `<p class="small muted" style="margin-top:8px">${e(aiLatest.summary.slice(0, 200))}</p>` : ''}<p class="small muted" style="margin-top:8px">Scheduled hourly. The AI reads messages, proposes tasks, and processes completion claims — never posts to chat.</p></div>` : '';
-  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div></div>${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
+  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div><div class="metric"><small>Active announcements</small><b>${activeAnnouncements.length}</b>${badge(activeAnnouncements.length ? 'Published' : 'None', activeAnnouncements.length ? '' : 'gray')}</div></div>${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
 }
 
 function attentionScreen() {
   const open = wsItems(data.issues).filter((i) => i.status === 'open');
   const pending = wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status));
-  return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Needs Attention', 'Only items that need a decision', badge(`${open.length + pending.length} pending`, 'amber'))}<h2 class="section-title">Open issues</h2><div class="stack">${open.length ? open.map((i) => `<button class="card list-row" data-nav="manage/issue/${e(i.id)}"><span class="avatar rose">${icon('alert')}</span><span class="grow"><strong>${e(i.title)}</strong><p>${e(i.description)}</p></span>${icon('chevron')}</button>`).join('') : empty('No open issues', 'Serious problems will appear here.')}</div><h2 class="section-title">Awaiting review</h2><div class="stack">${pending.length ? pending.map((t) => `<button class="card list-row" data-nav="task/${e(t.id)}"><span class="avatar orange">${icon('shield')}</span><span class="grow"><strong>${e(t.name)}</strong><p>Verification required · ${e(t.due)}</p></span>${icon('chevron')}</button>`).join('') : empty('Nothing to review', 'No approvals are pending right now.')}</div></section>`;
+  return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Needs Attention', 'Only items that need a decision', badge(`${open.length + pending.length} pending`, 'amber'))}<h2 class="section-title">Open issues</h2><div class="stack">${open.length ? open.map((i) => `<button class="card list-row" data-nav="manage/issue/${e(i.id)}"><span class="avatar ${i.issueType === 'safety' ? 'red' : 'rose'}">${icon('alert')}</span><span class="grow"><strong>${e(i.title)}</strong><p>${e(i.description)}</p>${i.reporterId ? `<small class="muted">Reported by ${e(member(i.reporterId).name)}</small>` : ''}${i.issueType ? `<span class="badge blue" style="margin-left:6px">${e(i.issueType)}</span>` : ''}</span>${icon('chevron')}</button>`).join('') : empty('No open issues', 'Serious problems will appear here.')}</div><h2 class="section-title">Awaiting review</h2><div class="stack">${pending.length ? pending.map((t) => `<button class="card list-row" data-nav="task/${e(t.id)}"><span class="avatar orange">${icon('shield')}</span><span class="grow"><strong>${e(t.name)}</strong><p>Verification required · ${e(t.due)}</p></span>${icon('chevron')}</button>`).join('') : empty('Nothing to review', 'No approvals are pending right now.')}</div></section>`;
 }
 
 function proposalsScreen() {
@@ -146,6 +156,35 @@ function proposalsScreen() {
   const pending = proposals.filter((p) => p.status === 'pending');
   const reviewed = proposals.filter((p) => p.status !== 'pending');
   return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Silent AI Proposals', 'AI-generated suggestions for your review', badge(`${pending.length} pending`, pending.length ? 'amber' : ''))}<div class="soft-panel info-row">${icon('spark', 18)}<span>The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Review each proposal carefully before approving or rejecting.</span></div><h2 class="section-title">Pending (${pending.length})</h2><div class="proposals-section">${pending.length ? pending.map(proposalCard).join('') : empty('No pending proposals', 'The AI has no proposals waiting for review.')}</div>${reviewed.length ? `<h2 class="section-title">Reviewed (${reviewed.length})</h2><div class="proposals-section">${reviewed.map(proposalCard).join('')}</div>` : ''}</section>`;
+}
+
+function announcementsScreen() {
+  const all = wsItems(data.announcements);
+  const published = all.filter((a) => a.status === 'published' && !a.archivedAt);
+  const archived = all.filter((a) => a.archivedAt);
+  const drafts = all.filter((a) => a.status === 'draft');
+  return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Announcements', 'Publish notices and pinned alerts', admin() ? `<button class="btn" data-action="compose-announcement">${icon('plus', 16)} New</button>` : '')}<div class="soft-panel info-row">${icon('megaphone', 18)}<span>Publish announcements visible to all workspace members. Safety notices linked to unresolved issues cannot be archived until the issue is resolved. The AI can draft announcements but only the manager can publish.</span></div>${drafts.length ? `<h2 class="section-title">Drafts (${drafts.length})</h2><div class="stack">${drafts.map(announcementCard).join('')}</div>` : ''}<h2 class="section-title">Active (${published.length})</h2><div class="stack">${published.length ? published.map(announcementCard).join('') : empty('No active announcements', 'Create a new announcement to pin it for your team.')}</div>${archived.length ? `<h2 class="section-title">Archived (${archived.length})</h2><div class="stack">${archived.map(announcementCard).join('')}</div>` : ''}</section>`;
+}
+
+function announcementCard(a) {
+  const ackCount = (a.acknowledgments || []).length;
+  const totalMembers = workspace()?.members?.length || 0;
+  const isSafety = a.type === 'safety';
+  const linkedIssue = a.linkedIssueId ? data.issues.find((i) => i.id === a.linkedIssueId) : null;
+  const canArchive = !(isSafety && linkedIssue && linkedIssue.status === 'open');
+  return `<button class="card announcement-card ${isSafety ? 'safety' : ''} ${a.archivedAt ? 'archived' : ''}" data-nav="announcement/${encodeURIComponent(a.id)}"><div class="row between"><div class="row" style="gap:8px"><span class="badge ${isSafety ? 'red' : 'blue'}">${icon(isSafety ? 'warning' : 'megaphone', 13)} ${e(a.type)}</span>${a.archivedAt ? badge('ARCHIVED', 'gray') : badge('PUBLISHED', '')}</div>${icon('chevron', 17)}</div><h3>${e(a.title)}</h3><p class="muted small">${e((a.body || '').slice(0, 120))}${(a.body || '').length > 120 ? '...' : ''}</p>${linkedIssue ? `<div class="soft-panel" style="margin-top:8px;padding:6px 10px"><small>${icon('link', 13)} Linked issue: ${e(linkedIssue.title)} — ${badge(linkedIssue.status.toUpperCase(), linkedIssue.status === 'open' ? 'red' : '')}</small></div>` : ''}<div class="row between" style="margin-top:8px"><small class="muted">${a.publishedAt ? displayTime(a.publishedAt) : 'Not published'} · By ${e(member(a.publisherId || a.createdBy).name)}</small><small class="muted">${ackCount}/${totalMembers} acknowledged</small></div></button>`;
+}
+
+function announcementDetailScreen(id) {
+  const a = data.announcements.find((x) => x.id === id);
+  if (!a) return notFound();
+  const acks = a.acknowledgments || [];
+  const myAck = acks.find((ack) => ack.personId === identity?.userId);
+  const revisions = a.revisions || [];
+  const linkedIssue = a.linkedIssueId ? data.issues.find((i) => i.id === a.linkedIssueId) : null;
+  const isSafety = a.type === 'safety';
+  const canArchive = admin() && !a.archivedAt && !(isSafety && linkedIssue && linkedIssue.status === 'open');
+  return `<section class="surface-page"><button class="section-back" data-nav="${admin() ? 'manage/announcements' : 'chat'}">${icon('back', 17)} ${admin() ? 'Announcements' : 'Chat'}</button>${pageHeading(a.title, a.type === 'safety' ? 'Safety notice' : 'Team notice', badge(a.type.toUpperCase(), isSafety ? 'red' : 'blue'))}<div class="two-col"><div class="stack"><div class="card"><div class="card-title">Announcement</div><p class="readable">${e(a.body || '')}</p>${linkedIssue ? `<div class="soft-panel">${icon('link', 16)} <strong>Linked issue:</strong> ${e(linkedIssue.title)}<br/><small>${badge(linkedIssue.status.toUpperCase(), linkedIssue.status === 'open' ? 'red' : '')} ${e(linkedIssue.description || '')}</small></div>` : ''}<div class="divider"></div><div class="row between"><span class="muted small">Published by</span><span class="row">${personAvatar(a.publisherId || a.createdBy)} ${e(member(a.publisherId || a.createdBy).name)}</span></div>${a.publishedAt ? `<div class="row between" style="margin-top:8px"><span class="muted small">Published</span><small>${displayTime(a.publishedAt)}</small></div>` : ''}${a.archivedAt ? `<div class="row between" style="margin-top:8px"><span class="muted small">Archived</span><small>${displayTime(a.archivedAt)}</small></div>` : ''}</div>${revisions.length ? `<div class="card"><div class="card-title">Revision history (${revisions.length})</div>${revisions.map((r) => `<div class="soft-panel" style="margin-bottom:8px"><small>Edited by ${e(member(r.editorId).name)} · ${displayTime(r.editedAt)}</small>${r.oldTitle !== r.newTitle ? `<br/><small><s>${e(r.oldTitle)}</s> → <strong>${e(r.newTitle)}</strong></small>` : ''}</div>`).join('')}</div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Acknowledgments (${acks.length}/${workspace()?.members?.length || 0})</div>${acks.length ? `<div class="inline-list">${acks.map((ack) => `<div class="list-row">${personAvatar(ack.personId)}<span class="grow"><strong>${e(member(ack.personId).name)}</strong><small>Acknowledged ${displayTime(ack.acknowledgedAt)}</small></span>${icon('check', 16)}</div>`).join('')}</div>` : '<p class="muted">No acknowledgments yet.</p>'}${!myAck && !a.archivedAt && !admin() ? `<button class="btn full pad-top" data-action="ack-announcement" data-id="${e(a.id)}">${icon('check', 17)} Acknowledge this notice</button>` : myAck ? `<div class="soft-panel" style="margin-top:10px">${icon('check', 16)} You acknowledged this notice</div>` : ''}</div>${admin() && !a.archivedAt ? `<div class="card"><div class="card-title">Manager actions</div><div class="stack" style="gap:8px"><button class="btn outline full" data-action="edit-announcement" data-id="${e(a.id)}">${icon('edit', 16)} Edit announcement</button>${canArchive ? `<button class="btn outline full" data-action="archive-announcement" data-id="${e(a.id)}">${icon('archive', 16)} Archive announcement</button>` : `<div class="alert-panel">${icon('warning', 15)} Cannot archive: linked safety issue is still open. Resolve the issue first.</div>`}</div></div>` : ''}</div></div></section>`;
 }
 
 function allWorkScreen() {
@@ -173,7 +212,15 @@ function issueScreen(id) {
   const i = data.issues.find((x) => x.id === id && x.ws === currentWorkspace);
   if (!i) return notFound();
   const source = data.messages.find((m) => m.id === i.source);
-  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status === 'open' ? 'red' : ''))}<div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">A repeated equipment issue remains unresolved. Completing the request for an inspection is not proof that the machine is safe.</p></div></div><div class="stack"><div class="card"><div class="card-title">Administrator decision</div>${i.status === 'open' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="approve-inspection" data-id="${e(i.id)}">${icon('shield', 17)} Approve inspection request</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved by the administrator.${i.evidence ? `<br/><small>Evidence: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
+  const linkedAnn = i.linkedAnnouncementId ? data.announcements.find((a) => a.id === i.linkedAnnouncementId) : null;
+  const stages = [
+    { key: 'reported', label: 'Reported', done: true, detail: i.reporterId ? `By ${member(i.reporterId).name}` : 'Detected by AI' },
+    { key: 'acknowledged', label: 'Acknowledged', done: i.status !== 'open' || i.approved, detail: i.approved ? 'Manager acknowledged' : 'Pending' },
+    { key: 'in_progress', label: 'Action in progress', done: ['in_progress', 'resolved'].includes(i.status), detail: '' },
+    { key: 'qualified_verification', label: 'Qualified verification', done: i.status === 'resolved' && !!i.qualifiedVerifier, detail: i.qualifiedVerifier ? `By ${member(i.qualifiedVerifier).name}` : 'Required' },
+    { key: 'resolved', label: 'Resolved', done: i.status === 'resolved', detail: i.verifiedAt ? displayTime(i.verifiedAt) : '' },
+  ];
+  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status === 'open' ? 'red' : ''))}<div class="lifecycle-stages">${stages.map((s) => `<div class="lifecycle-stage ${s.done ? 'done' : ''}"><div class="lifecycle-dot ${s.done ? 'done' : ''}">${s.done ? icon('check', 12) : ''}</div><div class="grow"><strong>${e(s.label)}</strong>${s.detail ? `<small class="muted">${e(s.detail)}</small>` : ''}</div></div>`).join('')}</div><div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${i.issueType ? `<div class="soft-panel" style="margin-top:8px"><small>Type: ${e(i.issueType)}</small></div>` : ''}${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}${i.reporterId ? `<div class="row between" style="margin-top:8px"><span class="muted small">Reported by</span><span class="row">${personAvatar(i.reporterId)} ${e(member(i.reporterId).name)}</span></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div>${linkedAnn ? `<div class="card"><div class="card-title">Linked announcement</div><button class="list-row" data-nav="announcement/${encodeURIComponent(linkedAnn.id)}">${icon('megaphone')}<span class="grow"><strong>${e(linkedAnn.title)}</strong><small>${badge(linkedAnn.type.toUpperCase(), linkedAnn.type === 'safety' ? 'red' : 'blue')}</small></span>${icon('chevron', 17)}</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">A repeated equipment issue remains unresolved. Completing the request for an inspection is not proof that the machine is safe.</p></div><div class="card"><div class="card-title">Administrator decision</div>${i.status === 'open' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="approve-inspection" data-id="${e(i.id)}">${icon('shield', 17)} Approve inspection request</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved.${i.qualifiedVerifier ? `<br/><small>Verified by: ${e(member(i.qualifiedVerifier).name)}</small>` : ''}${i.verificationEvidence ? `<br/><small>Evidence: ${e(i.verificationEvidence)}</small>` : ''}${i.evidence ? `<br/><small>Notes: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
 }
 
 function createWorkspaceScreen() {
@@ -203,8 +250,26 @@ function popup() {
   if (activeDialog === 'task') {
     return `<div class="dialog-backdrop"><form class="dialog" id="new-task-form" role="dialog" aria-modal="true"><h2>Add a task</h2><p>Create an assignment for this workspace. WorkBuddy AI task creation is manually triggered.</p><div class="field-group"><label for="task-name">Task name</label><input id="task-name" class="field" name="name" maxlength="100" required placeholder="e.g. Check paper cups" autofocus /></div><div class="field-group"><label for="task-description">Instructions</label><textarea id="task-description" class="textarea" name="description" placeholder="What needs doing?"></textarea></div><div class="field-group"><label>Assign to</label><select class="field" name="assignee">${workspace()?.members.map((id) => `<option value="${e(id)}" ${id === identity?.userId ? 'selected' : ''}>${e(member(id).name)}</option>`).join('') || ''}</select></div><div class="row actions"><button type="button" class="btn outline" data-action="close-dialog">Cancel</button><button type="submit" class="btn">Add task</button></div></form></div>`;
   }
+  if (activeDialog === 'flag-issue') {
+    const msg = data.messages.find((m) => m.id === flagMsgId && m.ws === currentWorkspace);
+    const msgPreview = msg ? `"${msg.body.slice(0, 80)}${msg.body.length > 80 ? '...' : ''}" — ${member(msg.user).name}` : '';
+    return `<div class="dialog-backdrop"><form class="dialog" id="flag-issue-form" role="dialog" aria-modal="true"><h2>${icon('flag', 18)} Flag as issue</h2><p>Report this message as an operational problem that needs attention.</p>${msgPreview ? `<div class="soft-panel">${e(msgPreview)}</div>` : ''}<div class="field-group"><label for="issue-title">Issue title</label><input id="issue-title" class="field" name="title" maxlength="100" required placeholder="e.g. Equipment problem reported" autofocus /></div><div class="field-group"><label for="issue-desc">Description</label><textarea id="issue-desc" class="textarea" name="description" rows="3" placeholder="What is the problem?"></textarea></div><div class="field-group"><label for="issue-type">Issue type</label><select id="issue-type" class="field" name="issueType"><option value="equipment">Equipment</option><option value="safety">Safety</option><option value="supply">Supply / Stock</option><option value="facility">Facility</option><option value="other">Other</option></select></div><div class="row actions"><button type="button" class="btn outline" data-action="close-dialog">Cancel</button><button type="submit" class="btn">Flag issue</button></div></form></div>`;
+  }
+  if (activeDialog === 'compose-announcement') {
+    const draftTitle = pendingAnnouncementDraft?.title || '';
+    const draftBody = pendingAnnouncementDraft?.body || '';
+    const draftType = pendingAnnouncementDraft?.type || 'general';
+    const draftLinkedIssue = pendingAnnouncementDraft?.linkedIssueId || '';
+    const openIssues = wsItems(data.issues).filter((i) => i.status === 'open');
+    return `<div class="dialog-backdrop"><form class="dialog" id="announcement-form" role="dialog" aria-modal="true"><h2>${icon('megaphone', 18)} New announcement</h2><p>Publish a notice visible to all workspace members. Safety notices pinned to chat until archived.</p>${pendingAnnouncementDraft?.aiGenerated ? `<div class="soft-panel">${icon('spark', 15)} <small>AI draft suggested. Review and edit before publishing.</small></div>` : ''}<div class="field-group"><label for="ann-title">Title</label><input id="ann-title" class="field" name="title" maxlength="150" required value="${e(draftTitle)}" placeholder="e.g. Machine 2 out of service" autofocus /></div><div class="field-group"><label for="ann-body">Body</label><textarea id="ann-body" class="textarea" name="body" rows="4" required placeholder="Write the announcement content...">${e(draftBody)}</textarea></div><div class="field-group"><label for="ann-type">Type</label><select id="ann-type" class="field" name="type"><option value="general" ${draftType === 'general' ? 'selected' : ''}>General notice</option><option value="safety" ${draftType === 'safety' ? 'selected' : ''}>Safety alert</option><option value="operational" ${draftType === 'operational' ? 'selected' : ''}>Operational update</option></select></div>${openIssues.length ? `<div class="field-group"><label for="ann-linked">Link to issue (optional)</label><select id="ann-linked" class="field" name="linkedIssueId"><option value="">No linked issue</option>${openIssues.map((i) => `<option value="${e(i.id)}" ${draftLinkedIssue === i.id ? 'selected' : ''}>${e(i.title)}</option>`).join('')}</select></div>` : ''}<div class="row actions"><button type="button" class="btn outline" data-action="close-dialog">Cancel</button><button type="submit" class="btn">Publish</button></div></form></div>`;
+  }
+  if (activeDialog === 'edit-announcement') {
+    const a = data.announcements.find((x) => x.id === pendingAnnouncementId);
+    if (!a) { activeDialog = ''; return ''; }
+    return `<div class="dialog-backdrop"><form class="dialog" id="edit-announcement-form" role="dialog" aria-modal="true"><h2>${icon('edit', 18)} Edit announcement</h2><p>Editing creates a revision record. The previous version is preserved in the revision history.</p><div class="field-group"><label for="edit-ann-title">Title</label><input id="edit-ann-title" class="field" name="title" maxlength="150" required value="${e(a.title)}" autofocus /></div><div class="field-group"><label for="edit-ann-body">Body</label><textarea id="edit-ann-body" class="textarea" name="body" rows="4" required>${e(a.body || '')}</textarea></div><div class="row actions"><button type="button" class="btn outline" data-action="close-dialog">Cancel</button><button type="submit" class="btn">Save changes</button></div></form></div>`;
+  }
   if (activeDialog === 'resolve') {
-    return `<div class="dialog-backdrop"><form class="dialog" id="resolve-form" role="dialog" aria-modal="true"><h2>Record verified resolution</h2><p>Only record a genuine inspection and safe-to-use confirmation. This demo does not certify equipment safety.</p><div class="field-group"><label>How was it verified?</label><textarea class="textarea" name="proof" required placeholder="Qualified verifier, inspection result, and date"></textarea></div><div class="row actions"><button class="btn outline" type="button" data-action="close-dialog">Cancel</button><button class="btn" type="submit">Record resolution</button></div></form></div>`;
+    return `<div class="dialog-backdrop"><form class="dialog" id="resolve-form" role="dialog" aria-modal="true"><h2>Record verified resolution</h2><p>Only record a genuine inspection and safe-to-use confirmation. This demo does not certify equipment safety.</p><div class="field-group"><label>How was it verified?</label><textarea class="textarea" name="proof" required placeholder="Qualified verifier, inspection result, and date"></textarea></div><div class="field-group"><label>Verification evidence</label><textarea class="textarea" name="evidence" rows="2" placeholder="e.g. Technician report #TR-2026, safety inspection certificate"></textarea></div><div class="row actions"><button class="btn outline" type="button" data-action="close-dialog">Cancel</button><button class="btn" type="submit">Record resolution</button></div></form></div>`;
   }
   if (activeDialog === 'reset') {
     return `<div class="dialog-backdrop"><div class="dialog" role="dialog" aria-modal="true"><h2>Reset demonstration?</h2><p>This will reset the shared backend to its initial demo state. All phones connected to this server will see the reset data.</p><div class="row actions"><button class="btn outline" data-action="close-dialog">Cancel</button><button class="btn danger" data-action="confirm-reset">Reset demo</button></div></div></div>`;
@@ -238,8 +303,9 @@ function render() {
     else if (path === 'shift') view = shiftScreen();
     else if (path === 'handover') view = handoverScreen();
     else if (path === 'profile') view = profileScreen();
-    else if (path === 'manage') view = manageHome();
+    else     if (path === 'manage') view = manageHome();
     else if (path === 'manage/attention') view = attentionScreen();
+    else if (path === 'manage/announcements') view = announcementsScreen();
     else if (path === 'manage/proposals') view = proposalsScreen();
     else if (path === 'manage/all-work') view = allWorkScreen();
     else if (path === 'manage/team') view = teamScreen();
@@ -247,6 +313,7 @@ function render() {
     else if (path === 'manage/invites') view = invitesScreen();
     else if (path === 'manage/settings') view = settingsScreen();
     else if (path.startsWith('manage/issue/')) view = issueScreen(path.split('/')[2]);
+    else if (path.startsWith('announcement/')) view = announcementDetailScreen(path.split('/')[1]);
     else if (path === 'workspace/create') view = createWorkspaceScreen();
     else if (path === 'workspace/invite') view = invitesScreen(true);
     else if (path === 'workspace/rules') view = rulesScreen(true);
@@ -470,7 +537,54 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
-  // ── Copy / share invite ──────────────────────────────────────────
+  // ── Flag message as issue (Phase 6) ──────────────────────────────
+  if (action === 'flag-message') {
+    flagMsgId = id;
+    activeDialog = 'flag-issue';
+    render();
+    return;
+  }
+
+  // ── Compose announcement (Phase 6) ──────────────────────────────
+  if (action === 'compose-announcement') {
+    if (!admin()) return notify('Only administrators can publish announcements.');
+    pendingAnnouncementDraft = null;
+    activeDialog = 'compose-announcement';
+    render();
+    return;
+  }
+
+  // Acknowledge announcement (Phase 6)
+  if (action === 'ack-announcement') {
+    try {
+      await api.acknowledgeAnnouncement(id);
+      await refreshAnnouncements();
+      notify('Announcement acknowledged');
+    } catch (err) { notify('Ack failed: ' + err.message); }
+    return;
+  }
+
+  // Edit announcement (Phase 6)
+  if (action === 'edit-announcement') {
+    if (!admin()) return;
+    pendingAnnouncementId = id;
+    activeDialog = 'edit-announcement';
+    render();
+    return;
+  }
+
+  // Archive announcement (Phase 6)
+  if (action === 'archive-announcement') {
+    if (!admin()) return;
+    try {
+      await api.archiveAnnouncement(id);
+      await refreshAnnouncements();
+      notify('Announcement archived');
+    } catch (err) { notify('Archive failed: ' + err.message); }
+    return;
+  }
+
+  // ─<arg_value>─ Copy / share invite ──────────────────────────────────────────
   if (action === 'copy-invite' || action === 'share-invite') {
     const str = action === 'copy-invite' ? (workspace()?.invite || '') : `${location.origin}${location.pathname}#/profile?invite=${encodeURIComponent(workspace()?.invite || '')}`;
     try { await navigator.clipboard.writeText(str); notify('Demo invite copied'); } catch { notify(`Demo code: ${workspace()?.invite || ''}`); }
@@ -611,21 +725,103 @@ app.addEventListener('submit', async (event) => {
   if (form.id === 'resolve-form') {
     const text = String(fields.proof || '').trim();
     if (!text) return;
+    const evidence = String(fields.evidence || '').trim();
     const i = data.issues.find((x) => x.id === pendingIssueId && x.ws === currentWorkspace && x.status === 'open');
     if (i) {
       i.status = 'resolved';
       i.evidence = text.slice(0, 1000);
-      i.resolvedAt = Date.now();
+      i.qualifiedVerifier = identity.userId;
+      i.verificationEvidence = evidence.slice(0, 1000);
+      i.verifiedAt = Date.now();
       render();
     }
     activeDialog = '';
     try {
-      await api.updateIssue(pendingIssueId, { status: 'resolved', evidence: text.slice(0, 1000), actor: identity.userId });
-      notify('Resolution recorded on the server — not independently verified');
+      await api.resolveIssue(pendingIssueId, {
+        verifier: identity.userId,
+        evidence: evidence.slice(0, 1000),
+        notes: text.slice(0, 1000),
+        actor: identity.userId,
+      });
+      await refreshIssues();
+      notify('Resolution recorded with qualified verification — not independently certified');
     } catch (err) {
       notify('Update failed: ' + err.message);
       await refreshIssues();
     }
+    return;
+  }
+
+  // ── Flag issue from chat message (Phase 6) ───────────────────────
+  if (form.id === 'flag-issue-form') {
+    const title = String(fields.title || '').trim();
+    if (!title) return;
+    const description = String(fields.description || '').trim();
+    const issueType = String(fields.issueType || 'equipment');
+    activeDialog = '';
+    try {
+      await api.reportIssue(currentWorkspace, {
+        messageId: flagMsgId,
+        reporterId: identity.userId,
+        title: title.slice(0, 100),
+        description: description.slice(0, 1000),
+        issueType,
+      });
+      await refreshIssues();
+      notify('Issue reported from chat message');
+    } catch (err) {
+      notify('Flag failed: ' + err.message);
+    }
+    flagMsgId = null;
+    return;
+  }
+
+  // ── Publish announcement (Phase 6) ───────────────────────────────
+  if (form.id === 'announcement-form') {
+    if (!admin()) return;
+    const title = String(fields.title || '').trim();
+    const body = String(fields.body || '').trim();
+    if (!title || !body) return;
+    const type = String(fields.type || 'general');
+    const linkedIssueId = String(fields.linkedIssueId || '').trim() || null;
+    activeDialog = '';
+    try {
+      await api.createAnnouncement(currentWorkspace, {
+        title: title.slice(0, 150),
+        body: body.slice(0, 5000),
+        type,
+        linkedIssueId,
+        publisherId: identity.userId,
+        createdBy: identity.userId,
+      });
+      await refreshAnnouncements();
+      notify('Announcement published');
+    } catch (err) {
+      notify('Publish failed: ' + err.message);
+    }
+    pendingAnnouncementDraft = null;
+    return;
+  }
+
+  // ── Edit announcement (Phase 6) ─────────────────────────────────
+  if (form.id === 'edit-announcement-form') {
+    if (!admin()) return;
+    const title = String(fields.title || '').trim();
+    const body = String(fields.body || '').trim();
+    if (!title || !body) return;
+    activeDialog = '';
+    try {
+      await api.updateAnnouncement(pendingAnnouncementId, {
+        title: title.slice(0, 150),
+        body: body.slice(0, 5000),
+        editorId: identity.userId,
+      });
+      await refreshAnnouncements();
+      notify('Announcement updated — revision saved');
+    } catch (err) {
+      notify('Edit failed: ' + err.message);
+    }
+    pendingAnnouncementId = null;
     return;
   }
 });
@@ -647,7 +843,7 @@ let sseCleanup = null;
 async function loadAllData() {
   try {
     await refreshWorkspaces();
-    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
+    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
   } catch (err) {
     connectionStatus = 'offline';
@@ -711,6 +907,13 @@ async function refreshAIStatus() {
   } catch { /* ai-status endpoint may not exist yet */ }
 }
 
+async function refreshAnnouncements() {
+  try {
+    const res = await api.getAnnouncements(currentWorkspace);
+    data.announcements = res.announcements || [];
+  } catch { /* announcements endpoint may not exist yet */ }
+}
+
 async function refreshShifts() {
   try {
     const res = await api.getShift(currentWorkspace);
@@ -727,7 +930,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -739,7 +942,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
       render();

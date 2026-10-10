@@ -89,6 +89,18 @@ const api = {
   getAIStatus: (ws) => request('GET', `/workspaces/${ws}/ai-status`),
   logAIAnalysis: (ws, data) => request('POST', `/workspaces/${ws}/ai-log`, data),
 
+  // ── Phase 6: Manager-direct task, issue flagging, announcements ──
+  createManagerTask: (ws, data) => request('POST', `/workspaces/${ws}/manager-task`, data),
+  reportIssue: (ws, data) => request('POST', `/workspaces/${ws}/report-issue`, data),
+  getAnnouncements: (ws) => request('GET', `/workspaces/${ws}/announcements`),
+  getActiveAnnouncements: (ws) => request('GET', `/workspaces/${ws}/announcements/active`),
+  getAnnouncement: (id) => request('GET', `/announcements/${id}`),
+  createAnnouncement: (ws, data) => request('POST', `/workspaces/${ws}/announcements`, data),
+  updateAnnouncement: (id, data) => request('PUT', `/announcements/${id}`, data),
+  archiveAnnouncement: (id) => request('PUT', `/announcements/${id}/archive`),
+  acknowledgeAnnouncement: (id) => request('POST', `/announcements/${id}/acknowledge`),
+  resolveIssue: (id, data) => request('PUT', `/issues/${id}/resolve`, data),
+
   // ── SSE ───────────────────────────────────────────────────────────
   /**
    * Open an SSE connection for a workspace. Calls onEvent(payload) for each update.

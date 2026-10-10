@@ -32,6 +32,8 @@ import {
   mapProposal,
   mapCompletionClaim,
   mapAIAnalysisLog,
+  mapAnnouncement,
+  mapAnnouncementRevision,
 } from './db.js';
 import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
@@ -217,12 +219,39 @@ app.put('/api/workspaces/:id', (req, res) => {
 
 // ── Messages ────────────────────────────────────────────────────────
 
-/** GET /api/workspaces/:workspace/messages — list messages (optionally since a timestamp). */
+/** GET /api/workspaces/:workspace/messages — list messages.
+ *
+ * Supports two filter modes:
+ *   ?since=<timestamp>  — messages with created_at > timestamp (for live sync/polling)
+ *   ?sinceSeq=<n>        — messages with seq > n, ordered by seq ASC (for checkpoint-based pagination)
+ *
+ * Both filters can be combined. Pagination via ?limit=<n> (default 100, max 500).
+ * Response includes hasMore=true when more messages exist beyond the returned batch,
+ * and nextSinceSeq for the caller to use as the next cursor.
+ */
 app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => {
   const d = getDB();
   const since = req.query.since ? parseInt(req.query.since, 10) : 0;
-  const rows = d.prepare('SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? ORDER BY created_at ASC').all(req.workspaceId, since);
-  res.json({ messages: rows.map(mapMessage), revision: currentRevision() });
+  const sinceSeq = req.query.sinceSeq ? parseInt(req.query.sinceSeq, 10) : 0;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+
+  // Fetch limit+1 rows to determine hasMore without a second query.
+  const rows = d.prepare(
+    'SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? AND seq > ? ORDER BY seq ASC LIMIT ?',
+  ).all(req.workspaceId, since, sinceSeq, limit + 1);
+
+  const hasMore = rows.length > limit;
+  const messages = (hasMore ? rows.slice(0, limit) : rows).map(mapMessage);
+  const nextSinceSeq = hasMore && messages.length > 0
+    ? messages[messages.length - 1].seq
+    : null;
+
+  res.json({
+    messages,
+    hasMore,
+    nextSinceSeq,
+    revision: currentRevision(),
+  });
 });
 
 /** POST /api/workspaces/:workspace/messages — create a message (idempotent by client ID). */
@@ -551,11 +580,20 @@ app.get('/api/proposals/:id', (req, res) => {
   res.json(mapProposal(row));
 });
 
-/** POST /api/workspaces/:workspace/proposals — create a new AI proposal. */
+/** POST /api/workspaces/:workspace/proposals — create a new AI proposal.
+ *
+ * Deduplication (Phase 5.1): If sourceMessageId is provided, the endpoint
+ * checks for an existing proposal with the same workspace, source message,
+ * type, and summary. If found, the existing proposal is returned (with
+ * duplicate: true) instead of creating a new one. This prevents the
+ * scheduled AI from creating duplicate proposals across repeated runs.
+ * Proposals without a sourceMessageId are always created fresh.
+ */
 app.post('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) => {
   const {
     type, entityType = null, entityId = null, summary, evidence = [],
     reasoning = '', confidence = 'medium', proposedData = null,
+    sourceMessageId = null,
   } = req.body;
 
   const validTypes = ['task_proposal', 'completion_review', 'refusal', 'chat_completion_claim'];
@@ -563,13 +601,38 @@ app.post('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) =
   const trimmedSummary = String(summary || '').trim();
   if (!trimmedSummary) return res.status(400).json({ error: 'summary is required' });
 
-  const proposalId = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = Date.now();
   const d = getDB();
 
+  // ── Deduplication check ──────────────────────────────────────────
+  // If a sourceMessageId is provided, look for an existing proposal
+  // with the same workspace_id + source_message_id + type + summary.
+  // This prevents duplicate proposals from repeated AI analysis runs.
+  // The check covers ALL statuses (pending, approved, rejected) —
+  // once a proposal exists for a source message, it is not recreated.
+  if (sourceMessageId) {
+    const existing = d.prepare(
+      `SELECT * FROM ai_proposals
+       WHERE workspace_id = ? AND source_message_id = ? AND type = ? AND summary = ?
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(req.workspaceId, sourceMessageId, type, trimmedSummary.slice(0, 500));
+
+    if (existing) {
+      // Return the existing proposal with a duplicate flag.
+      // Do NOT create a new proposal, audit entry, or bump revision.
+      return res.status(200).json({
+        ...mapProposal(existing),
+        duplicate: true,
+        message: 'A proposal with the same source message, type, and summary already exists.',
+      });
+    }
+  }
+
+  const proposalId = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
   d.prepare(
-    `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, source_message_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
   ).run(
     proposalId, req.workspaceId, type, entityType, entityId,
     trimmedSummary.slice(0, 500),
@@ -577,6 +640,7 @@ app.post('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) =
     String(reasoning).slice(0, 4000),
     confidence,
     proposedData ? JSON.stringify(proposedData) : '',
+    sourceMessageId,
     ts,
   );
 
@@ -929,12 +993,13 @@ app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, 
     }
 
     d.prepare(
-      `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, created_at)
-       VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, source_message_id, created_at)
+       VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
     ).run(
       proposalId, ws, proposalType, taskId, proposalSummary,
       JSON.stringify(evidence), proposalReasoning, proposalConfidence,
       JSON.stringify({ claimId, taskId, messageId, reportingEmployee, finalTaskStatus, verificationApplied }),
+      messageId,
       ts,
     );
 
@@ -1010,6 +1075,11 @@ app.get('/api/workspaces/:workspace/ai-status', validateWorkspace, (req, res) =>
   const lastRunAt = latest?.run_at || 0;
   const stalled = lastRunAt > 0 && lastRunAt < twoHoursAgo;
 
+  // Detect running / stale-running state (Fix 4).
+  const isRunning = latest?.status === 'running';
+  const runningSince = isRunning ? latest.run_at : null;
+  const staleRunning = isRunning && (Date.now() - latest.run_at) >= STALE_RUN_MS;
+
   res.json({
     latest: latest ? mapAIAnalysisLog(latest) : null,
     aggregates: {
@@ -1020,6 +1090,9 @@ app.get('/api/workspaces/:workspace/ai-status', validateWorkspace, (req, res) =>
       lastRunAt: agg.last_run_at || null,
     },
     stalled,
+    running: isRunning,
+    runningSince,
+    staleRunning,
     revision: currentRevision(),
   });
 });
@@ -1037,8 +1110,10 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
     summary = '',
   } = req.body;
 
-  // Validate status enum.
-  const validStatuses = ['success', 'partial', 'error', 'stalled'];
+  // Validate status enum — 'running' and 'interrupted' are used by the
+  // new ai-run/* lifecycle endpoints (Fix 4); the legacy one-shot POST
+  // /ai-log can also accept them for backward compatibility.
+  const validStatuses = ['success', 'partial', 'error', 'stalled', 'running', 'interrupted'];
   if (!validStatuses.includes(status)) {
     return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
   }
@@ -1077,6 +1152,718 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
   res.status(201).json(mapAIAnalysisLog(row));
 });
 
+// ── Silent AI Run Lifecycle (Phase 5.1 — Fix 4) ──────────────────────
+//
+// The legacy POST /ai-log endpoint records a completed run in one shot.
+// The new three-step lifecycle (start → checkpoint → finish) supports:
+//   • Overlap prevention — ai-run/start refuses if another run is active
+//     (stale runs older than 5 min are auto-finalized as 'interrupted').
+//   • Mid-run checkpointing — ai-run/checkpoint advances last_message_seq
+//     after each message or batch, so interrupted runs don't lose progress.
+//   • Per-message error quarantine — failed messages are recorded in
+//     processing_errors[] without blocking the checkpoint from advancing.
+//   • Clean finish — ai-run/finish finalizes status/summary/errors.
+
+const STALE_RUN_MS = 5 * 60 * 1000; // 5 minutes — overlap threshold
+
+/** POST /api/workspaces/:workspace/ai-run/start — begin a new analysis run. */
+app.post('/api/workspaces/:workspace/ai-run/start', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const ts = Date.now();
+
+  // Check for an existing 'running' entry in this workspace.
+  const active = d.prepare(
+    `SELECT * FROM ai_analysis_log
+     WHERE workspace_id = ? AND status = 'running'
+     ORDER BY run_at DESC LIMIT 1`,
+  ).get(req.workspaceId);
+
+  if (active) {
+    const elapsed = ts - active.run_at;
+    if (elapsed < STALE_RUN_MS) {
+      // Overlap: another run is in progress and hasn't gone stale.
+      return res.status(409).json({
+        error: 'A run is already in progress for this workspace.',
+        activeRun: mapAIAnalysisLog(active),
+        retryAfterMs: STALE_RUN_MS - elapsed,
+      });
+    }
+    // Stale run: auto-finalize as 'interrupted' so we can start a new one.
+    d.prepare(
+      `UPDATE ai_analysis_log
+       SET status = 'interrupted',
+           summary = COALESCE(summary, '') || ' [Auto-finalized: run exceeded 5 min without completion]'
+       WHERE id = ?`,
+    ).run(active.id);
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+      'ai_run_stale_finalize', 'ai_log', active.id, 'silent-ai',
+      `Stale run (elapsed ${Math.round(elapsed / 1000)}s) auto-finalized as interrupted.`,
+      ts,
+    );
+  }
+
+  // Starting checkpoint: latest non-running entry's last_message_seq.
+  const prev = d.prepare(
+    `SELECT last_message_seq FROM ai_analysis_log
+     WHERE workspace_id = ? AND status != 'running'
+     ORDER BY run_at DESC LIMIT 1`,
+  ).get(req.workspaceId);
+  const startSeq = prev?.last_message_seq || 0;
+
+  // Create a new 'running' entry.
+  const logId = `ail_${ts.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  d.prepare(
+    `INSERT INTO ai_analysis_log
+       (id, workspace_id, run_at, messages_total, messages_new,
+        proposals_created, completion_claims, errors, last_message_seq,
+        status, summary, processing_errors, created_at)
+     VALUES (?, ?, ?, 0, 0, 0, 0, '', ?, 'running', '', '[]', ?)`,
+  ).run(logId, req.workspaceId, ts, startSeq, ts);
+
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+    'ai_run_start', 'ai_log', logId, 'silent-ai',
+    `Analysis run started. Starting checkpoint: seq ${startSeq}.`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'ai_run', action: 'started', id: logId });
+
+  const row = d.prepare('SELECT * FROM ai_analysis_log WHERE id = ?').get(logId);
+  res.status(201).json({ ...mapAIAnalysisLog(row), startSeq });
+});
+
+/** PATCH /api/workspaces/:workspace/ai-run/checkpoint — advance mid-run progress. */
+app.patch('/api/workspaces/:workspace/ai-run/checkpoint', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const active = d.prepare(
+    `SELECT * FROM ai_analysis_log
+     WHERE workspace_id = ? AND status = 'running'
+     ORDER BY run_at DESC LIMIT 1`,
+  ).get(req.workspaceId);
+
+  if (!active) {
+    return res.status(404).json({ error: 'No active run to checkpoint.' });
+  }
+
+  const {
+    lastMessageSeq,
+    proposalsCreated,
+    completionClaims,
+    messagesNew,
+    processingErrors,
+  } = req.body;
+
+  // Advance only forward — never let the checkpoint go backward.
+  const newSeq = Math.max(
+    active.last_message_seq,
+    Math.max(0, parseInt(lastMessageSeq, 10) || 0),
+  );
+
+  // Merge processing errors into the existing JSON array (quarantine).
+  let errorsArr = [];
+  try { errorsArr = JSON.parse(active.processing_errors || '[]'); } catch { /* keep empty */ }
+  if (Array.isArray(processingErrors)) {
+    errorsArr = [...errorsArr, ...processingErrors];
+  }
+
+  d.prepare(
+    `UPDATE ai_analysis_log
+     SET last_message_seq = ?,
+         proposals_created = ?,
+         completion_claims = ?,
+         messages_new = ?,
+         processing_errors = ?
+     WHERE id = ?`,
+  ).run(
+    newSeq,
+    Math.max(active.proposals_created, Math.max(0, parseInt(proposalsCreated, 10) || 0)),
+    Math.max(active.completion_claims, Math.max(0, parseInt(completionClaims, 10) || 0)),
+    Math.max(active.messages_new, Math.max(0, parseInt(messagesNew, 10) || 0)),
+    JSON.stringify(errorsArr),
+    active.id,
+  );
+
+  const row = d.prepare('SELECT * FROM ai_analysis_log WHERE id = ?').get(active.id);
+  res.json(mapAIAnalysisLog(row));
+});
+
+/** POST /api/workspaces/:workspace/ai-run/finish — finalize an analysis run. */
+app.post('/api/workspaces/:workspace/ai-run/finish', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const active = d.prepare(
+    `SELECT * FROM ai_analysis_log
+     WHERE workspace_id = ? AND status = 'running'
+     ORDER BY run_at DESC LIMIT 1`,
+  ).get(req.workspaceId);
+
+  if (!active) {
+    return res.status(404).json({ error: 'No active run to finalize.' });
+  }
+
+  const {
+    messagesTotal = active.messages_new,
+    messagesNew = active.messages_new,
+    proposalsCreated = active.proposals_created,
+    completionClaims = active.completion_claims,
+    lastMessageSeq = active.last_message_seq,
+    errors = '',
+    status = 'success',
+    summary = '',
+    processingErrors,
+  } = req.body;
+
+  const validFinal = ['success', 'partial', 'error', 'interrupted'];
+  if (!validFinal.includes(status)) {
+    return res.status(400).json({
+      error: `status must be one of: ${validFinal.join(', ')}`,
+    });
+  }
+
+  // Merge any final processing errors.
+  let errorsArr = [];
+  try { errorsArr = JSON.parse(active.processing_errors || '[]'); } catch { /* keep empty */ }
+  if (Array.isArray(processingErrors)) {
+    errorsArr = [...errorsArr, ...processingErrors];
+  }
+
+  const ts = Date.now();
+  d.prepare(
+    `UPDATE ai_analysis_log
+     SET messages_total = ?,
+         messages_new = ?,
+         proposals_created = ?,
+         completion_claims = ?,
+         last_message_seq = ?,
+         errors = ?,
+         status = ?,
+         summary = ?,
+         processing_errors = ?
+     WHERE id = ?`,
+  ).run(
+    Math.max(0, parseInt(messagesTotal, 10) || 0),
+    Math.max(0, parseInt(messagesNew, 10) || 0),
+    Math.max(0, parseInt(proposalsCreated, 10) || 0),
+    Math.max(0, parseInt(completionClaims, 10) || 0),
+    Math.max(active.last_message_seq, Math.max(0, parseInt(lastMessageSeq, 10) || 0)),
+    String(errors).slice(0, 2000),
+    status,
+    String(summary).slice(0, 2000),
+    JSON.stringify(errorsArr),
+    active.id,
+  );
+
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+    'ai_run_finish', 'ai_log', active.id, 'silent-ai',
+    `Analysis run finalized. Status: ${status}. ${messagesNew} new msgs, ${proposalsCreated} proposals, ${completionClaims} claims. ${errorsArr.length > 0 ? errorsArr.length + ' quarantined errors.' : ''}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'ai_run', action: 'finished', id: active.id });
+
+  const row = d.prepare('SELECT * FROM ai_analysis_log WHERE id = ?').get(active.id);
+  res.json(mapAIAnalysisLog(row));
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 6: Direct Task Assignment, Issue Reporting & Announcements
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Helper: check if a user is a workspace member ───────────────────
+function isWorkspaceMember(d, workspaceId, personId) {
+  if (!personId) return false;
+  const row = d.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND person_id = ?').get(workspaceId, personId);
+  return !!row;
+}
+
+// ── Helper: get the manager (admin) of a workspace ─────────────────
+function getWorkspaceManager(d, workspaceId) {
+  const row = d.prepare('SELECT person_id FROM workspace_members WHERE workspace_id = ? AND role = ?').get(workspaceId, 'admin');
+  return row?.person_id || null;
+}
+
+// ── Workflow A: Direct Manager Task Assignment ─────────────────────
+
+/** POST /api/workspaces/:workspace/manager-task — create a routine task
+ *  directly from a verified manager instruction. No proposal needed.
+ *
+ *  Server-side validation:
+ *    1. Source message must exist in this workspace.
+ *    2. Source message author must be the workspace manager (admin).
+ *    3. Assignee must be a workspace member.
+ *    4. Category must be allowed (not protected: repairs, purchases, safety).
+ *    5. Idempotency: (workspace_id, source, name) unique index prevents duplicates.
+ */
+app.post('/api/workspaces/:workspace/manager-task', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const {
+    sourceMessageId, name, description = '', assignee = null,
+    priority = 'normal', category = 'routine', due = 'Today',
+    reasoning = '', createdBy = 'silent-ai',
+  } = req.body;
+
+  // 1. Validate required fields.
+  if (!sourceMessageId) return res.status(400).json({ error: 'sourceMessageId is required — must link to a real chat message' });
+  const trimmedName = String(name || '').trim();
+  if (!trimmedName) return res.status(400).json({ error: 'name is required' });
+
+  // 2. Verify the source message exists in this workspace.
+  const msg = d.prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?').get(sourceMessageId, req.workspaceId);
+  if (!msg) return res.status(404).json({ error: 'Source message not found in this workspace', messageId: sourceMessageId });
+
+  // 3. Verify the source message author is the workspace manager.
+  const managerId = getWorkspaceManager(d, req.workspaceId);
+  if (!managerId) return res.status(403).json({ error: 'No manager (admin) found for this workspace' });
+  if (msg.user_id !== managerId) {
+    return res.status(403).json({
+      error: 'Source message was not authored by the workspace manager',
+      messageAuthor: msg.user_id,
+      managerId,
+    });
+  }
+
+  // 4. Verify the assignee is a workspace member (if provided).
+  if (assignee && !isWorkspaceMember(d, req.workspaceId, assignee)) {
+    return res.status(403).json({ error: `Assignee "${assignee}" is not a member of this workspace` });
+  }
+
+  // 5. Verify the category is not protected.
+  if (PROTECTED_CATEGORIES.includes(category)) {
+    return res.status(403).json({
+      error: `Category "${category}" is protected — requires qualified verification, cannot be auto-assigned`,
+      protected: true,
+    });
+  }
+
+  // 6. Check workspace rules — is this category allowed?
+  const ruleRow = d.prepare('SELECT * FROM rules WHERE workspace_id = ? AND id = ?').get(req.workspaceId, category);
+  if (ruleRow && !ruleRow.allowed) {
+    return res.status(403).json({
+      error: `Category "${category}" is not allowed for automatic assignment in this workspace`,
+    });
+  }
+
+  // 7. Idempotency: check for existing task with same (workspace, source, name).
+  const existing = d.prepare(
+    'SELECT * FROM tasks WHERE workspace_id = ? AND source = ? AND name = ?',
+  ).get(req.workspaceId, sourceMessageId, trimmedName.slice(0, 100));
+
+  if (existing) {
+    return res.status(200).json({
+      ...mapTask(existing),
+      duplicate: true,
+      message: 'A task with the same source message and name already exists.',
+    });
+  }
+
+  // 8. Create the task directly — no proposal needed.
+  const taskId = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+
+  d.prepare(
+    `INSERT INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, 'self-report', '', ?, ?)`,
+  ).run(taskId, req.workspaceId, trimmedName.slice(0, 100), String(description).slice(0, 1000),
+    assignee, priority, category, String(due).slice(0, 50),
+    sourceMessageId, `${createdBy}-manager`, ts, ts);
+
+  // 9. Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+    'manager_task_created', 'task', taskId, createdBy,
+    `Direct task from manager instruction (msg ${sourceMessageId}): "${trimmedName}" assigned to ${assignee || 'unassigned'}. Reasoning: ${reasoning.slice(0, 200)}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'task', action: 'created', id: taskId, direct: true });
+
+  const row = d.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
+  res.status(201).json({ ...mapTask(row), direct: true, message: 'Task created directly from manager instruction.' });
+});
+
+// ── Workflow B: Employee Reports Chat Message as Issue ─────────────
+
+/** POST /api/workspaces/:workspace/report-issue — flag a chat message as
+ *  an operational issue. Creates the issue immediately — no AI needed.
+ *
+ *  Idempotency: unique index on (workspace_id, source) prevents duplicate
+ *  issues from the same message. If an issue already exists, returns it.
+ */
+app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const { messageId, reporterId, title = '', issueType = 'general' } = req.body;
+
+  if (!messageId) return res.status(400).json({ error: 'messageId is required' });
+  if (!reporterId) return res.status(400).json({ error: 'reporterId is required' });
+
+  // Verify the message exists in this workspace.
+  const msg = d.prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?').get(messageId, req.workspaceId);
+  if (!msg) return res.status(404).json({ error: 'Message not found in this workspace', messageId });
+
+  // Verify the reporter is a workspace member.
+  if (!isWorkspaceMember(d, req.workspaceId, reporterId)) {
+    return res.status(403).json({ error: 'Reporter is not a member of this workspace' });
+  }
+
+  // Idempotency: check for existing issue with same (workspace, source).
+  const existing = d.prepare(
+    'SELECT * FROM issues WHERE workspace_id = ? AND source = ?',
+  ).get(req.workspaceId, messageId);
+
+  if (existing) {
+    return res.status(200).json({
+      ...mapIssue(existing),
+      duplicate: true,
+      message: 'An issue has already been reported for this message.',
+    });
+  }
+
+  // Create the issue.
+  const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+  const issueTitle = title.trim() || `Reported issue from ${msg.user_id}'s message`;
+
+  d.prepare(
+    `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at)
+     VALUES (?, ?, ?, ?, 'normal', 'reported', ?, ?, ?, 0, 0, ?, ?, ?)`,
+  ).run(issueId, req.workspaceId, issueTitle.slice(0, 200),
+    msg.body, messageId, reporterId, reporterId,
+    `Source message: "${msg.body.slice(0, 200)}"`, issueType, ts);
+
+  // Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+    'issue_reported', 'issue', issueId, reporterId,
+    `Employee ${reporterId} flagged message ${messageId} as an issue: "${msg.body.slice(0, 150)}"`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'issue', action: 'reported', id: issueId, messageId });
+
+  const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(issueId);
+  res.status(201).json(mapIssue(row));
+});
+
+// ── Workflow C: Manager-Controlled Announcements ───────────────────
+
+/** POST /api/workspaces/:workspace/announcements — create or publish an announcement.
+ *
+ *  Body:
+ *    title, body, type ('general'|'important'|'safety'), status ('draft'|'active'),
+ *    publisherId (must be workspace manager/admin),
+ *    linkedIssueId (optional — for AI drafts responding to a flagged issue)
+ */
+app.post('/api/workspaces/:workspace/announcements', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const { title, body, type = 'general', status = 'active', publisherId, linkedIssueId = null } = req.body;
+
+  const trimmedTitle = String(title || '').trim();
+  const trimmedBody = String(body || '').trim();
+  if (!trimmedTitle) return res.status(400).json({ error: 'title is required' });
+  if (!trimmedBody) return res.status(400).json({ error: 'body is required' });
+
+  // Validate type.
+  const validTypes = ['general', 'important', 'safety'];
+  if (!validTypes.includes(type)) return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
+
+  // Validate status.
+  const validStatuses = ['draft', 'active'];
+  if (!validStatuses.includes(status)) return res.status(400).json({ error: `status must be 'draft' or 'active'` });
+
+  // If publishing (status=active), verify publisher is the workspace manager.
+  let publisher = null;
+  if (status === 'active') {
+    if (!publisherId) return res.status(400).json({ error: 'publisherId is required to publish an announcement' });
+    const managerId = getWorkspaceManager(d, req.workspaceId);
+    if (!managerId || publisherId !== managerId) {
+      return res.status(403).json({ error: 'Only the workspace manager can publish announcements' });
+    }
+    publisher = publisherId;
+  }
+
+  // If linkedIssueId provided, verify it exists in this workspace.
+  if (linkedIssueId) {
+    const issue = d.prepare('SELECT id FROM issues WHERE id = ? AND workspace_id = ?').get(linkedIssueId, req.workspaceId);
+    if (!issue) return res.status(404).json({ error: 'Linked issue not found in this workspace' });
+  }
+
+  const annId = `a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+
+  d.prepare(
+    `INSERT INTO announcements (id, workspace_id, title, body, type, status, publisher_id, linked_issue_id, created_by, created_at, published_at, archived_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+  ).run(annId, req.workspaceId, trimmedTitle.slice(0, 200), trimmedBody.slice(0, 2000),
+    type, status, publisher, linkedIssueId,
+    status === 'active' ? publisherId : (publisherId || 'silent-ai'),
+    ts, status === 'active' ? ts : null);
+
+  // Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
+    status === 'active' ? 'announcement_published' : 'announcement_draft_created',
+    'announcement', annId,
+    publisherId || 'silent-ai',
+    `${status === 'active' ? 'Published' : 'Drafted'} announcement "${trimmedTitle.slice(0, 80)}" (type: ${type})${linkedIssueId ? ` linked to issue ${linkedIssueId}` : ''}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'announcement', action: status === 'active' ? 'published' : 'drafted', id: annId });
+
+  const row = d.prepare('SELECT * FROM announcements WHERE id = ?').get(annId);
+  res.status(201).json(mapAnnouncement(row));
+});
+
+/** GET /api/workspaces/:workspace/announcements — list announcements.
+ *  ?status=active|draft|archived (default: all)
+ */
+app.get('/api/workspaces/:workspace/announcements', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const statusFilter = req.query.status;
+  let rows;
+  if (statusFilter) {
+    rows = d.prepare('SELECT * FROM announcements WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC').all(req.workspaceId, statusFilter);
+  } else {
+    rows = d.prepare('SELECT * FROM announcements WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
+  }
+
+  const announcements = rows.map((row) => {
+    const ann = mapAnnouncement(row);
+    // Include acknowledgment count for each announcement.
+    const ackCount = d.prepare('SELECT COUNT(*) as c FROM announcement_acknowledgments WHERE announcement_id = ?').get(row.id);
+    ann.acknowledgmentCount = ackCount?.c || 0;
+    return ann;
+  });
+
+  res.json({ announcements, revision: currentRevision() });
+});
+
+/** GET /api/workspaces/:workspace/announcements/active — get active pinned notices. */
+app.get('/api/workspaces/:workspace/announcements/active', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const rows = d.prepare('SELECT * FROM announcements WHERE workspace_id = ? AND status = ? ORDER BY published_at DESC').all(req.workspaceId, 'active');
+
+  const announcements = rows.map((row) => {
+    const ann = mapAnnouncement(row);
+    const ackCount = d.prepare('SELECT COUNT(*) as c FROM announcement_acknowledgments WHERE announcement_id = ?').get(row.id);
+    ann.acknowledgmentCount = ackCount?.c || 0;
+    // Get list of members who acknowledged.
+    const acks = d.prepare('SELECT person_id, acknowledged_at FROM announcement_acknowledgments WHERE announcement_id = ?').all(row.id);
+    ann.acknowledgedBy = acks.map((a) => a.person_id);
+    return ann;
+  });
+
+  res.json({ announcements, revision: currentRevision() });
+});
+
+/** GET /api/announcements/:id — get a single announcement with details. */
+app.get('/api/announcements/:id', (req, res) => {
+  const d = getDB();
+  const row = d.prepare('SELECT * FROM announcements WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'announcement not found' });
+
+  const ann = mapAnnouncement(row);
+  // Include acknowledgment list.
+  const acks = d.prepare('SELECT person_id, acknowledged_at FROM announcement_acknowledgments WHERE announcement_id = ?').all(req.params.id);
+  ann.acknowledgments = acks;
+  ann.acknowledgmentCount = acks.length;
+
+  // Include revision history.
+  const revs = d.prepare('SELECT * FROM announcement_revisions WHERE announcement_id = ? ORDER BY edited_at ASC').all(req.params.id);
+  ann.revisions = revs.map(mapAnnouncementRevision);
+
+  res.json(ann);
+});
+
+/** PUT /api/announcements/:id — edit an announcement (creates revision record). */
+app.put('/api/announcements/:id', (req, res) => {
+  const d = getDB();
+  const { id } = req.params;
+  const { title, body, editorId } = req.body;
+
+  const row = d.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'announcement not found' });
+
+  // Verify editor is the workspace manager.
+  const managerId = getWorkspaceManager(d, row.workspace_id);
+  if (!managerId || editorId !== managerId) {
+    return res.status(403).json({ error: 'Only the workspace manager can edit announcements' });
+  }
+
+  const ts = Date.now();
+  const newTitle = title !== undefined ? String(title).trim().slice(0, 200) : row.title;
+  const newBody = body !== undefined ? String(body).trim().slice(0, 2000) : row.body;
+
+  // Create revision record.
+  if (title !== undefined || body !== undefined) {
+    d.prepare(
+      'INSERT INTO announcement_revisions (id, announcement_id, old_title, new_title, old_body, new_body, editor_id, edited_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      `rev_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, id,
+      row.title, newTitle, row.body, newBody, editorId, ts,
+    );
+  }
+
+  // Update the announcement.
+  d.prepare('UPDATE announcements SET title = ?, body = ? WHERE id = ?').run(newTitle, newBody, id);
+
+  // Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id,
+    'announcement_edited', 'announcement', id, editorId,
+    `Edited announcement "${newTitle.slice(0, 80)}"`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(row.workspace_id, { type: 'announcement', action: 'edited', id });
+
+  const updated = d.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  res.json(mapAnnouncement(updated));
+});
+
+/** PUT /api/announcements/:id/archive — archive an announcement.
+ *  Safety warnings linked to protected issues cannot be archived until
+ *  the issue is resolved with qualified clearance.
+ */
+app.put('/api/announcements/:id/archive', (req, res) => {
+  const d = getDB();
+  const { id } = req.params;
+  const { archiverId } = req.body;
+
+  const row = d.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'announcement not found' });
+  if (row.status === 'archived') return res.status(400).json({ error: 'announcement is already archived' });
+
+  // Verify archiver is the workspace manager.
+  const managerId = getWorkspaceManager(d, row.workspace_id);
+  if (!managerId || archiverId !== managerId) {
+    return res.status(403).json({ error: 'Only the workspace manager can archive announcements' });
+  }
+
+  // Safety check: if this is a safety announcement linked to an unresolved issue,
+  // prevent archiving until the issue is resolved.
+  if (row.type === 'safety' && row.linked_issue_id) {
+    const issue = d.prepare('SELECT status, verified_at FROM issues WHERE id = ?').get(row.linked_issue_id);
+    if (issue && issue.status !== 'resolved' && !issue.verified_at) {
+      return res.status(403).json({
+        error: 'Cannot archive a safety warning linked to an unresolved issue. The issue must be resolved with qualified clearance first.',
+        linkedIssueId: row.linked_issue_id,
+        issueStatus: issue.status,
+      });
+    }
+  }
+
+  const ts = Date.now();
+  d.prepare('UPDATE announcements SET status = ?, archived_at = ? WHERE id = ?').run('archived', ts, id);
+
+  // Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id,
+    'announcement_archived', 'announcement', id, archiverId,
+    `Archived announcement "${row.title.slice(0, 80)}"`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(row.workspace_id, { type: 'announcement', action: 'archived', id });
+
+  const updated = d.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  res.json(mapAnnouncement(updated));
+});
+
+/** POST /api/announcements/:id/acknowledge — employee acknowledges a notice.
+ *  Idempotent: PRIMARY KEY (announcement_id, person_id) prevents duplicates.
+ */
+app.post('/api/announcements/:id/acknowledge', (req, res) => {
+  const d = getDB();
+  const { id } = req.params;
+  const { personId } = req.body;
+
+  if (!personId) return res.status(400).json({ error: 'personId is required' });
+
+  const ann = d.prepare('SELECT * FROM announcements WHERE id = ?').get(id);
+  if (!ann) return res.status(404).json({ error: 'announcement not found' });
+  if (ann.status !== 'active') return res.status(400).json({ error: 'can only acknowledge active announcements' });
+
+  // Verify person is a workspace member.
+  if (!isWorkspaceMember(d, ann.workspace_id, personId)) {
+    return res.status(403).json({ error: 'Only workspace members can acknowledge announcements' });
+  }
+
+  // Idempotent insert (INSERT OR IGNORE — if already acknowledged, that's fine).
+  const ts = Date.now();
+  const info = d.prepare(
+    'INSERT OR IGNORE INTO announcement_acknowledgments (announcement_id, person_id, acknowledged_at) VALUES (?, ?, ?)',
+  ).run(id, personId, ts);
+
+  if (info.changes > 0) {
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ann.workspace_id,
+      'announcement_acknowledged', 'announcement', id, personId,
+      `Acknowledged by ${personId}`,
+      ts,
+    );
+    bumpRevision();
+    notifySSE(ann.workspace_id, { type: 'announcement', action: 'acknowledged', id, personId });
+  }
+
+  // Return updated acknowledgment count.
+  const ackCount = d.prepare('SELECT COUNT(*) as c FROM announcement_acknowledgments WHERE announcement_id = ?').get(id);
+  res.json({ acknowledged: true, acknowledgmentCount: ackCount?.c || 0, personId });
+});
+
+// ── Issue Resolution with Qualified Clearance ──────────────────────
+
+/** PUT /api/issues/:id/resolve — resolve an issue with qualified clearance.
+ *
+ *  Records:
+ *    - qualifiedVerifier (who provided clearance)
+ *    - verificationEvidence (evidence reference)
+ *    - verifiedAt (timestamp)
+ *
+ *  AI cannot independently resolve issues — this must be called by a human
+ *  (manager or designated qualified person).
+ */
+app.put('/api/issues/:id/resolve', (req, res) => {
+  const d = getDB();
+  const { id } = req.params;
+  const { qualifiedVerifier, verificationEvidence, resolvedBy } = req.body;
+
+  const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'issue not found' });
+  if (row.status === 'resolved') return res.status(400).json({ error: 'issue is already resolved' });
+
+  if (!qualifiedVerifier) return res.status(400).json({ error: 'qualifiedVerifier is required' });
+  if (!verificationEvidence) return res.status(400).json({ error: 'verificationEvidence is required' });
+
+  const ts = Date.now();
+  d.prepare(
+    `UPDATE issues SET status = 'resolved', resolved_at = ?, qualified_verifier = ?, verification_evidence = ?, verified_at = ? WHERE id = ?`,
+  ).run(ts, qualifiedVerifier, String(verificationEvidence).slice(0, 2000), ts, id);
+
+  // Audit entry.
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id,
+    'issue_resolved', 'issue', id, resolvedBy || qualifiedVerifier,
+    `Issue resolved. Qualified verifier: ${qualifiedVerifier}. Evidence: ${String(verificationEvidence).slice(0, 200)}`,
+    ts,
+  );
+
+  bumpRevision();
+  notifySSE(row.workspace_id, { type: 'issue', action: 'resolved', id });
+
+  const updated = d.prepare('SELECT * FROM issues WHERE id = ?').get(id);
+  res.json(mapIssue(updated));
+});
+
 // ── Sync endpoint (for polling) ─────────────────────────────────────
 
 /** GET /api/sync?workspace=X&revision=N — returns whether data changed since revision N. */
@@ -1097,6 +1884,9 @@ app.get('/api/sync', (req, res) => {
 app.post('/api/reset', (_req, res) => {
   const d = getDB();
   d.exec(`
+    DELETE FROM announcement_acknowledgments;
+    DELETE FROM announcement_revisions;
+    DELETE FROM announcements;
     DELETE FROM ai_analysis_log;
     DELETE FROM completion_claims;
     DELETE FROM ai_proposals;

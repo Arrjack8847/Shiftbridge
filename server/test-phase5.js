@@ -28,7 +28,17 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, rmSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const LIVE_DB = resolve(__dirname, 'shiftbridge.db');
 const TEST_DB = resolve(__dirname, 'test-phase5.db');
+
+// ── Safeguard: refuse to run against the live database ──────────────
+// If SHIFTBRIDGE_DB_PATH is already set to the live database path,
+// abort immediately to prevent data destruction.
+if (process.env.SHIFTBRIDGE_DB_PATH && resolve(process.env.SHIFTBRIDGE_DB_PATH) === LIVE_DB) {
+  console.error('\n  FATAL: Refusing to run tests against the live database at:');
+  console.error(`  ${LIVE_DB}\n`);
+  process.exit(2);
+}
 
 // Clean up any previous test database.
 if (existsSync(TEST_DB)) {
