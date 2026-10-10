@@ -24,3 +24,20 @@
 .loading-dots span:nth-child(2){animation-delay:.2s}
 .loading-dots span:nth-child(3){animation-delay:.4s}
 @keyframes dotbounce{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}}
+
+/* ── Silent AI Proposals ────────────────────────────────────────── */
+.proposals-section{display:flex;flex-direction:column;gap:14px;margin-bottom:24px}
+.proposal-card{background:#fff;border:1px solid var(--line);border-left:3px solid var(--teal2);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow)}
+.proposal-card.reviewed{opacity:.65;border-left-color:var(--muted)}
+.proposal-card.reviewed .proposal-actions{display:none}
+.proposal-header{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.proposal-summary{font-size:15px;font-weight:700;color:var(--ink);margin:0 0 12px;line-height:1.4}
+.proposal-evidence{background:#f0f7f5;border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.proposal-evidence ul{margin:6px 0 0;padding-left:18px}
+.proposal-evidence li{font-size:12px;color:var(--ink);line-height:1.6}
+.proposal-reasoning{background:#f4f0ff;border-radius:10px;padding:12px 14px;margin-bottom:14px}
+.proposal-reasoning p{font-size:12px;color:var(--ink);line-height:1.6;margin:6px 0 0}
+.proposal-actions{display:flex;gap:10px}
+.proposal-actions .btn{flex:1}
+.proposal-reviewed-note{padding-top:6px;border-top:1px solid var(--line)}
+.proposal-reviewed-note small{color:var(--muted);font-size:11px}

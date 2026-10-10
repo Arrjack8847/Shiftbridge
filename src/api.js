@@ -64,6 +64,15 @@ const api = {
   // ── Audit log ─────────────────────────────────────────────────────
   getAudit: (ws, since = 0) => request('GET', `/workspaces/${ws}/audit?since=${since}`),
 
+  // ── AI Proposals (Silent AI agent) ─────────────────────────────────
+  getProposals: (ws, status = '') => {
+    const q = status ? `?status=${status}` : '';
+    return request('GET', `/workspaces/${ws}/proposals${q}`);
+  },
+  getProposal: (id) => request('GET', `/proposals/${id}`),
+  createProposal: (ws, data) => request('POST', `/workspaces/${ws}/proposals`, data),
+  reviewProposal: (id, data) => request('PUT', `/proposals/${id}/review`, data),
+
   // ── Sync ──────────────────────────────────────────────────────────
   sync: (ws, revision = 0) => request('GET', `/sync?workspace=${ws}&revision=${revision}`),
   health: () => request('GET', '/health'),

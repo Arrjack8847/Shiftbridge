@@ -1,17 +1,18 @@
-# ShiftBridge — Multi-device team chat & task management
+# ShiftBridge — Silent AI agent for team shift handover
 
-ShiftBridge is a shared backend for small-business team communication with operational task management. Built for DORMATHON 2026 with WorkBuddy Agentic Solutions.
+ShiftBridge is a shared backend for small-business team communication with operational task management and a **Silent AI reasoning agent** that monitors workspace activity. Built for DORMATHON 2026 with WorkBuddy Agentic Solutions.
 
-The **single group chat** is the home screen for employees and administrators. On mobile a large raised **Chat** button sits between **Tasks** and **Shift** buttons; administrators also have a **Manage** area.
+The **single group chat** is the home screen for employees and administrators. On mobile a large raised **Chat** button sits between **Tasks** and **Shift** buttons; administrators also have a **Manage** area with **Silent AI Proposals**.
 
 ## Architecture
 
 - **Frontend**: Vanilla HTML/CSS/JavaScript (no React/Next.js)
 - **Backend**: Node.js + Express + SQLite (better-sqlite3)
+- **MCP Server**: Stdio transport server exposing 5 AI tools
 - **Real-time sync**: Server-Sent Events (SSE) + 2-second polling fallback
 - **Database**: Single SQLite file at `server/shiftbridge.db`
 
-The backend is the **single source of truth** for all shared data: messages, tasks, issues, workspaces, rules, shifts, and handovers. Each phone persists only its selected demo identity in localStorage.
+The backend is the **single source of truth** for all shared data: messages, tasks, issues, workspaces, rules, shifts, handovers, and AI proposals. Each phone persists only its selected demo identity in localStorage.
 
 ## Quick start
 
@@ -29,34 +30,40 @@ The server starts on `0.0.0.0:3000`. The console will print:
 
 Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on phones connected to the same Wi-Fi.
 
-## Multi-phone testing
+## Silent AI Agent (MCP Integration)
 
-1. Start the server on your Windows laptop: `npm run dev`
-2. Note the IPv4 address printed (e.g. `172.20.10.3`)
-3. On Phone A, open `http://172.20.10.3:3000` → select **Manager**
-4. On Phone B, open the same URL → select **Jack**
-5. On Phone C, open the same URL → select **Emma**
-6. Manager sends "Jack, please check the oat milk stock."
-7. Jack and Emma receive it automatically (SSE + 2s polling)
-8. Jack replies "I checked it. Four cartons remaining."
-9. All phones see Jack's reply
-10. Manager creates a task and assigns it to Jack
-11. Jack sees the task on his phone
-12. Jack reports completion → Manager sees the updated status
+The Silent AI agent connects via **Model Context Protocol (MCP)** with stdio transport. It monitors workspace activity and creates proposals that managers review in the dashboard.
 
-## Demo identities
+### Connecting WorkBuddy Desktop
 
-No authentication. Each phone picks a demo identity:
+The MCP config is at `~/.workbuddy-ai/mcp.json`:
 
-| Identity   | Role          |
-|------------|---------------|
-| Manager    | Administrator |
-| Jack       | Employee      |
-| Emma       | Employee      |
-| Sarah      | Shift Lead    |
-| Liam       | Employee      |
+```json
+{
+  "mcpServers": {
+    "shiftbridge": {
+      "command": "node",
+      "args": ["C:\\path\\to\\server\\mcp-server.js"]
+    }
+  }
+}
+```
 
-**⚠️ This is a simulated demo identity, NOT secure authentication. Do not expose this backend to the public internet.**
+After adding the config, open WorkBuddy Desktop → Connectors → trust the new MCP server.
+
+### MCP Tools (5)
+
+| Tool | Description |
+|------|-------------|
+| `list_tasks` | List all tasks in a workspace with status, assignee, category, and verification |
+| `propose_task` | Propose a new task with evidence and reasoning for manager review |
+| `review_completion` | Review a completion claim, gather evidence, produce AI reasoning |
+| `refuse_protected_work` | Create a refusal proposal for protected work lacking qualified verification |
+| `get_audit_trail` | Retrieve the full audit log for a workspace |
+
+### Protected Task Enforcement
+
+Tasks in **repairs**, **purchases**, or **safety** categories automatically get `verification: 'qualified'`. When an employee tries to mark these as `done`, the server redirects the status to `review` instead — the completion claim is preserved but requires qualified review before final approval.
 
 ## API endpoints
 
@@ -68,13 +75,17 @@ No authentication. Each phone picks a demo identity:
 | GET | `/api/workspaces/:ws/messages` | List messages (supports `?since=timestamp`) |
 | POST | `/api/workspaces/:ws/messages` | Send a message (idempotent by client ID) |
 | GET | `/api/workspaces/:ws/tasks` | List all tasks |
-| POST | `/api/workspaces/:ws/tasks` | Create a task (idempotent) |
+| POST | `/api/workspaces/:ws/tasks` | Create a task (auto-sets qualified verification for protected categories) |
 | GET | `/api/tasks/:id` | Get a single task |
-| PUT | `/api/tasks/:id` | Update task status/completion |
+| PUT | `/api/tasks/:id` | Update task (server enforces review for protected tasks) |
 | GET | `/api/workspaces/:ws/issues` | List issues |
 | GET | `/api/issues/:id` | Get a single issue |
 | PUT | `/api/issues/:id` | Update issue (resolve, approve, etc.) |
-| PUT | `/api/rules/:id` | Toggle a rule |
+| PUT | `/api/rules/:id` | Toggle a rule (locked rules cannot be changed) |
+| GET | `/api/workspaces/:ws/proposals` | List AI proposals (supports `?status=pending`) |
+| GET | `/api/proposals/:id` | Get a single proposal |
+| POST | `/api/workspaces/:ws/proposals` | Create an AI proposal (task_proposal, completion_review, refusal) |
+| PUT | `/api/proposals/:id/review` | Approve or reject a proposal (auto-applies side effects) |
 | GET | `/api/workspaces/:ws/shift` | Get shift state |
 | PUT | `/api/workspaces/:ws/shift` | Clock in/out |
 | GET | `/api/workspaces/:ws/handover` | Get handover |
@@ -92,8 +103,9 @@ No authentication. Each phone picks a demo identity:
 - `#/tasks` and `#/task/:id` — My Tasks, task detail, status changes
 - `#/shift`, `#/handover` — attendance and shift handover
 - `#/profile` — demo identity, profile and workspace switcher
-- `#/manage` — admin overview (administrator only)
+- `#/manage` — admin overview with Silent AI Proposals section
 - `#/manage/attention` — unresolved issues and review items
+- `#/manage/proposals` — all AI proposals (pending and reviewed)
 - `#/manage/all-work` — all workspace tasks and issues
 - `#/manage/team` — members and shift coverage
 - `#/manage/invites` — sample invite code
@@ -105,8 +117,9 @@ No authentication. Each phone picks a demo identity:
 
 ```bash
 npm run check          # Syntax-check all JS files
-npm run test:backend   # Run backend integration tests
+npm run test:backend   # Run backend integration tests (17 tests)
 npm run seed           # Re-seed the database
+npm run mcp            # Start MCP server (for manual testing)
 ```
 
 ## Project structure
@@ -115,18 +128,18 @@ npm run seed           # Re-seed the database
 ├── index.html              # App mount point
 ├── styles.css             # All styling (mobile-first, responsive)
 ├── src/
-│   ├── app.js             # Main app: routing, rendering, API integration
-│   ├── api.js             # API client (fetch wrapper)
+│   ├── app.js             # Main app: routing, rendering, API integration, proposals
+│   ├── api.js             # API client (fetch wrapper, proposals methods)
 │   ├── data.js            # Demo people, helpers, identity storage
 │   └── icons.js           # Inline SVG icons
 ├── server/
-│   ├── index.js           # Express server (static + API + SSE)
-│   ├── db.js              # SQLite schema and row mappers
+│   ├── index.js           # Express server (static + API + SSE + proposals + enforcement)
+│   ├── db.js              # SQLite schema and row mappers (includes ai_proposals table)
 │   ├── seed.js            # Initial demo data seeding
-│   ├── rule-defaults.js   # Shared rule definitions
+│   ├── rule-defaults.js   # Shared rule definitions (locked: repairs, purchases, safety)
+│   ├── mcp-server.js      # MCP server (stdio transport, 5 tools for Silent AI agent)
+│   ├── test.js            # 17 backend integration tests
 │   └── shiftbridge.db     # SQLite database (auto-created, gitignored)
-├── scripts/
-│   └── serve.mjs          # Legacy static-only server (unused)
 └── assets/
     └── mark.svg            # ShiftBridge logo
 ```
@@ -136,5 +149,4 @@ npm run seed           # Re-seed the database
 1. **No authentication** — demo identities are simulated and not secure
 2. **No file uploads** — photo attachment button shows a notice
 3. **LAN-only** — do not expose this backend to the public internet
-4. **WorkBuddy MCP** — Phase 4 integration is manual, not continuous autonomous processing
-5. **Safety-sensitive work** — equipment repairs, spending, and safety certification are never silently authorized
+4. **Safety-sensitive work** — equipment repairs, spending, and safety certification are never silently authorized; server-side enforcement redirects `done` → `review` for protected tasks

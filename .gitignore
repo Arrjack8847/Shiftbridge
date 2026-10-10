@@ -10,3 +10,6 @@ preview-test.html
 server/shiftbridge.db
 server/shiftbridge.db-shm
 server/shiftbridge.db-wal
+
+# WorkBuddy AI project data
+.workbuddy-ai/

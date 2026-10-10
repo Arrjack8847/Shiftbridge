@@ -29,6 +29,7 @@ import {
   mapIssue,
   mapRule,
   mapAudit,
+  mapProposal,
 } from './db.js';
 import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
@@ -114,6 +115,18 @@ const DEMO_PEOPLE = [
 app.get('/api/people', (_req, res) => {
   res.json(DEMO_PEOPLE);
 });
+
+// ── Protected task enforcement ─────────────────────────────────────
+// These categories mirror the locked rules (repairs, purchases, safety).
+// Tasks in these categories — or any task with verification='qualified' —
+// cannot be marked 'done' directly. They must go through 'review' status,
+// where the AI agent or a qualified human inspects the completion claim.
+const PROTECTED_CATEGORIES = ['repairs', 'purchases', 'safety'];
+
+/** Returns true if the task requires qualified verification before 'done'. */
+function isProtectedTask(task) {
+  return task.verification === 'qualified' || PROTECTED_CATEGORIES.includes(task.category);
+}
 
 // ── Helper: validate workspace exists ───────────────────────────────
 function validateWorkspace(req, res, next) {
@@ -266,6 +279,12 @@ app.post('/api/workspaces/:workspace/tasks', validateWorkspace, (req, res) => {
   const trimmedName = String(name || '').trim();
   if (!trimmedName) return res.status(400).json({ error: 'name is required' });
 
+  // Enforce qualified verification for protected categories.
+  let finalVerification = verification;
+  if (PROTECTED_CATEGORIES.includes(category) && verification !== 'qualified') {
+    finalVerification = 'qualified';
+  }
+
   const taskId = id || `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = Date.now();
   const d = getDB();
@@ -276,7 +295,7 @@ app.post('/api/workspaces/:workspace/tasks', validateWorkspace, (req, res) => {
   ).run(
     taskId, req.workspaceId, trimmedName.slice(0, 100),
     String(description).slice(0, 1000), assignee, priority, category,
-    String(due).slice(0, 50), source, createdBy, verification, ts, ts,
+    String(due).slice(0, 50), source, createdBy, finalVerification, ts, ts,
   );
 
   if (info.changes > 0) {
@@ -308,6 +327,26 @@ app.put('/api/tasks/:id', (req, res) => {
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no updatable fields' });
 
   const ts = Date.now();
+  const actor = req.body.actor || 'unknown';
+
+  // ── Server-side enforcement: protected tasks cannot be marked 'done' directly.
+  // If a task is protected (qualified verification or locked category) and someone
+  // tries to set status='done', we redirect to 'review' instead. The completion
+  // claim is preserved in the completion field and an audit entry is logged.
+  // The AI agent (via MCP) will review the claim and either approve (→done) or
+  // reject (→doing) the task.
+  let enforced = false;
+  if (updates.status === 'done' && isProtectedTask(row)) {
+    updates.status = 'review';
+    enforced = true;
+  }
+
+  // Also enforce: if a non-protected task is being created with category changes
+  // that make it protected, upgrade verification automatically.
+  if (updates.category && PROTECTED_CATEGORIES.includes(updates.category) && row.verification !== 'qualified') {
+    updates.verification = 'qualified';
+  }
+
   const setClauses = Object.keys(updates).map((k) => `${k} = @${k}`).join(', ');
   updates.id = id;
   updates._updated = ts;
@@ -320,15 +359,20 @@ app.put('/api/tasks/:id', (req, res) => {
   params.id = id;
   stmt.run(params);
 
+  // Record the enforcement action in audit log.
+  if (enforced) {
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'enforced_review', 'task', id, 'system', `Protected task: status redirected to 'review' instead of 'done'`, ts,
+    );
+  }
+
   // Record status changes in audit log.
   if (updates.status && updates.status !== row.status) {
-    const actor = req.body.actor || 'unknown';
     d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
       `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', id, actor, `${row.status} → ${updates.status}`, ts,
     );
   }
   if (updates.completion !== undefined && updates.completion !== row.completion) {
-    const actor = req.body.actor || 'unknown';
     d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
       `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'completion_claim', 'task', id, actor, updates.completion, ts,
     );
@@ -482,6 +526,154 @@ app.get('/api/workspaces/:workspace/audit', validateWorkspace, (req, res) => {
   res.json({ audit: rows.map(mapAudit), revision: currentRevision() });
 });
 
+// ── AI Proposals (Silent AI agent proposals for manager review) ─────
+
+/** GET /api/workspaces/:workspace/proposals — list proposals, optionally filtered by status. */
+app.get('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const status = req.query.status;
+  let rows;
+  if (status) {
+    rows = d.prepare('SELECT * FROM ai_proposals WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC').all(req.workspaceId, status);
+  } else {
+    rows = d.prepare('SELECT * FROM ai_proposals WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
+  }
+  res.json({ proposals: rows.map(mapProposal), revision: currentRevision() });
+});
+
+/** GET /api/proposals/:id — get a single proposal. */
+app.get('/api/proposals/:id', (req, res) => {
+  const d = getDB();
+  const row = d.prepare('SELECT * FROM ai_proposals WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'proposal not found' });
+  res.json(mapProposal(row));
+});
+
+/** POST /api/workspaces/:workspace/proposals — create a new AI proposal. */
+app.post('/api/workspaces/:workspace/proposals', validateWorkspace, (req, res) => {
+  const {
+    type, entityType = null, entityId = null, summary, evidence = [],
+    reasoning = '', confidence = 'medium', proposedData = null,
+  } = req.body;
+
+  const validTypes = ['task_proposal', 'completion_review', 'refusal'];
+  if (!validTypes.includes(type)) return res.status(400).json({ error: 'invalid proposal type' });
+  const trimmedSummary = String(summary || '').trim();
+  if (!trimmedSummary) return res.status(400).json({ error: 'summary is required' });
+
+  const proposalId = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ts = Date.now();
+  const d = getDB();
+
+  d.prepare(
+    `INSERT INTO ai_proposals (id, workspace_id, type, entity_type, entity_id, summary, evidence, reasoning, confidence, status, proposed_data, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+  ).run(
+    proposalId, req.workspaceId, type, entityType, entityId,
+    trimmedSummary.slice(0, 500),
+    JSON.stringify(evidence),
+    String(reasoning).slice(0, 4000),
+    confidence,
+    proposedData ? JSON.stringify(proposedData) : '',
+    ts,
+  );
+
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId, 'ai_proposal_created', 'proposal', proposalId, 'silent-ai', `${type}: ${trimmedSummary}`, ts,
+  );
+
+  bumpRevision();
+  notifySSE(req.workspaceId, { type: 'proposal', action: 'created', id: proposalId });
+
+  const row = d.prepare('SELECT * FROM ai_proposals WHERE id = ?').get(proposalId);
+  res.status(201).json(mapProposal(row));
+});
+
+/** PUT /api/proposals/:id/review — approve or reject a proposal. */
+app.put('/api/proposals/:id/review', (req, res) => {
+  const { id } = req.params;
+  const { decision, reviewer = 'manager' } = req.body;
+
+  if (!['approve', 'reject'].includes(decision)) {
+    return res.status(400).json({ error: 'decision must be "approve" or "reject"' });
+  }
+
+  const d = getDB();
+  const row = d.prepare('SELECT * FROM ai_proposals WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'proposal not found' });
+  if (row.status !== 'pending') return res.status(409).json({ error: 'proposal already reviewed' });
+
+  const ts = Date.now();
+  const newStatus = decision === 'approve' ? 'approved' : 'rejected';
+
+  const tx = d.transaction(() => {
+    // Update proposal status.
+    d.prepare('UPDATE ai_proposals SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?').run(newStatus, reviewer, ts, id);
+
+    // Log the review in audit.
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'ai_proposal_reviewed', 'proposal', id, reviewer, `${decision}d: ${row.summary}`, ts,
+    );
+
+    // Apply side effects based on proposal type and decision.
+    if (decision === 'approve') {
+      if (row.type === 'task_proposal' && row.proposed_data) {
+        // Create the actual task from the proposed data.
+        const pd = JSON.parse(row.proposed_data);
+        const taskId = pd.id || `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const finalVerification = (['repairs', 'purchases', 'safety'].includes(pd.category) && pd.verification !== 'qualified') ? 'qualified' : (pd.verification || 'self-report');
+        d.prepare(
+          `INSERT OR IGNORE INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'todo', ?, ?, ?, ?, 'silent-ai', ?, '', ?, ?)`,
+        ).run(
+          taskId, row.workspace_id,
+          String(pd.name || '').slice(0, 100),
+          String(pd.description || '').slice(0, 1000),
+          pd.assignee || null,
+          pd.priority || 'normal',
+          pd.category || 'routine',
+          String(pd.due || 'Today').slice(0, 50),
+          pd.source || 'ai-proposal',
+          finalVerification, ts, ts,
+        );
+        d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_created', 'task', taskId, 'silent-ai', `Created from approved proposal: ${pd.name}`, ts,
+        );
+      } else if (row.type === 'completion_review' && row.entity_id) {
+        // Approve the completion claim — mark task as 'done'.
+        const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get(row.entity_id);
+        if (taskRow) {
+          d.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run('done', ts, row.entity_id);
+          d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+            `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', row.entity_id, 'silent-ai', `review → done (AI review approved)`, ts,
+          );
+        }
+      }
+      // For 'refusal' type: approval means the manager acknowledges the refusal.
+      // The task stays in its current status (e.g., 'review') — no automatic change.
+    } else {
+      // Rejection: for completion_review, send task back to 'doing'.
+      if (row.type === 'completion_review' && row.entity_id) {
+        const taskRow = d.prepare('SELECT * FROM tasks WHERE id = ?').get(row.entity_id);
+        if (taskRow && taskRow.status === 'review') {
+          d.prepare('UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?').run('doing', ts, row.entity_id);
+          d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+            `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, row.workspace_id, 'task_status_changed', 'task', row.entity_id, reviewer, `review → doing (AI review rejected)`, ts,
+          );
+        }
+      }
+    }
+
+    bumpRevision();
+  });
+  tx();
+
+  notifySSE(row.workspace_id, { type: 'proposal', action: 'reviewed', id, decision });
+
+  const updated = d.prepare('SELECT * FROM ai_proposals WHERE id = ?').get(id);
+  res.json(mapProposal(updated));
+});
+
 // ── Sync endpoint (for polling) ─────────────────────────────────────
 
 /** GET /api/sync?workspace=X&revision=N — returns whether data changed since revision N. */
@@ -502,6 +694,7 @@ app.get('/api/sync', (req, res) => {
 app.post('/api/reset', (_req, res) => {
   const d = getDB();
   d.exec(`
+    DELETE FROM ai_proposals;
     DELETE FROM audit_log;
     DELETE FROM handovers;
     DELETE FROM shifts;

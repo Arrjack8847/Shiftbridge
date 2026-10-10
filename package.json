@@ -1,13 +1,14 @@
 {
   "name": "shiftbridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "ShiftBridge — shared backend for multi-device team chat and task management",
+  "description": "ShiftBridge — silent AI agent for team shift handover with protected task verification",
   "scripts": {
     "dev": "node server/index.js",
     "start": "node server/index.js",
-    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js",
+    "mcp": "node server/mcp-server.js",
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js && node --check server/test.js && node --check server/mcp-server.js",
     "test:backend": "node server/test.js",
     "seed": "node server/seed.js"
   },

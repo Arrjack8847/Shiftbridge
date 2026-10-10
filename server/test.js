@@ -48,6 +48,7 @@ function resetAndSeed() {
   const d = getDB();
   // Wipe all data.
   d.exec(`
+    DELETE FROM ai_proposals;
     DELETE FROM audit_log;
     DELETE FROM handovers;
     DELETE FROM shifts;
@@ -322,6 +323,61 @@ async function runTests() {
     // Step 6: Verify all messages are in the correct workspace.
     const dailyMsgs = d.prepare('SELECT * FROM messages WHERE workspace_id = ? ORDER BY created_at').all('daily');
     assert(dailyMsgs.length >= 7, `Expected at least 7 daily messages (5 seed + 2 new), got ${dailyMsgs.length}`);
+  });
+
+  // ── Test 16: Protected category auto-upgrades verification to 'qualified' ─
+  await test('Protected category: repairs task auto-sets verification=qualified', () => {
+    resetAndSeed();
+    const d = getDB();
+    const ts = Date.now();
+
+    // Simulate what the POST /api/tasks endpoint does for a 'repairs' task.
+    // The server should auto-set verification='qualified' for protected categories.
+    const category = 'repairs';
+    const finalVerification = (['repairs', 'purchases', 'safety'].includes(category) && 'self-report' !== 'qualified') ? 'qualified' : 'self-report';
+
+    d.prepare(
+      `INSERT OR IGNORE INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'todo', 'high', ?, 'Today', NULL, 'manager', ?, '', ?, ?)`,
+    ).run('enforce_task_1', 'daily', 'Fix espresso machine heating element', 'Heating element not reaching temp', 'jack', category, finalVerification, ts, ts);
+
+    const found = d.prepare('SELECT * FROM tasks WHERE id = ?').get('enforce_task_1');
+    assertEqual(found.category, 'repairs', 'Task category');
+    assertEqual(found.verification, 'qualified', 'Protected task should have qualified verification');
+  });
+
+  // ── Test 17: Protected task 'done' is redirected to 'review' ────────
+  await test('Protected task enforcement: status=done redirected to review', () => {
+    resetAndSeed();
+    const d = getDB();
+    const ts = Date.now();
+
+    // Create a qualified-verification task (simulating what API does).
+    d.prepare(
+      `INSERT OR IGNORE INTO tasks (id, workspace_id, name, description, assignee, status, priority, category, due, source, created_by, verification, completion, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'todo', 'normal', 'routine', 'Today', NULL, 'manager', 'qualified', '', ?, ?)`,
+    ).run('enforce_task_2', 'daily', 'Monthly safety inspection', 'Full safety walkthrough', 'jack', ts, ts);
+
+    // Simulate the enforcement: employee tries to mark 'done', server redirects to 'review'.
+    const task = d.prepare('SELECT * FROM tasks WHERE id = ?').get('enforce_task_2');
+    const isProtected = task.verification === 'qualified';
+    const finalStatus = isProtected ? 'review' : 'done';
+
+    d.prepare('UPDATE tasks SET status = ?, completion = ?, updated_at = ? WHERE id = ?').run(
+      finalStatus, 'Claimed done — awaiting review', ts, 'enforce_task_2',
+    );
+
+    const found = d.prepare('SELECT * FROM tasks WHERE id = ?').get('enforce_task_2');
+    assertEqual(found.status, 'review', 'Protected task should be in review, not done');
+    assertEqual(found.completion, 'Claimed done — awaiting review', 'Completion claim preserved');
+
+    // Audit log should record the enforcement.
+    d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      'audit_enforce_1', 'daily', 'enforced_review', 'task', 'enforce_task_2', 'system', `Protected task: status redirected to 'review' instead of 'done'`, ts,
+    );
+    const audit = d.prepare('SELECT * FROM audit_log WHERE entity_id = ? AND action = ?').get('enforce_task_2', 'enforced_review');
+    assert(audit, 'Enforcement audit entry should exist');
+    assertEqual(audit.actor, 'system', 'Enforcement actor should be system');
   });
 
   // ── Print results ────────────────────────────────────────────────

@@ -161,6 +161,30 @@ export function initSchema() {
       key   TEXT PRIMARY KEY,
       value TEXT
     );
+
+    -- AI Proposals: proposals created by the Silent AI agent (via MCP).
+    -- The AI creates proposals for task creation, completion review, and
+    -- protected-work refusals. Managers review these in the dashboard.
+    CREATE TABLE IF NOT EXISTS ai_proposals (
+      id            TEXT PRIMARY KEY,
+      workspace_id  TEXT NOT NULL,
+      type          TEXT NOT NULL,
+      entity_type   TEXT,
+      entity_id     TEXT,
+      summary       TEXT NOT NULL,
+      evidence      TEXT DEFAULT '[]',
+      reasoning     TEXT DEFAULT '',
+      confidence    TEXT NOT NULL DEFAULT 'medium',
+      status        TEXT NOT NULL DEFAULT 'pending',
+      proposed_data TEXT DEFAULT '',
+      reviewed_by   TEXT,
+      reviewed_at   INTEGER,
+      created_at    INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_proposals_ws ON ai_proposals(workspace_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_proposals_entity ON ai_proposals(entity_type, entity_id);
   `);
 
   // Initialize revision counter if not present.
@@ -268,6 +292,30 @@ export function mapAudit(row) {
     entityId: row.entity_id,
     actor: row.actor,
     details: row.details || '',
+    createdAt: row.created_at,
+  };
+}
+
+export function mapProposal(row) {
+  if (!row) return null;
+  let evidence = [];
+  try { evidence = JSON.parse(row.evidence || '[]'); } catch { /* keep default */ }
+  let proposedData = null;
+  try { proposedData = row.proposed_data ? JSON.parse(row.proposed_data) : null; } catch { /* keep default */ }
+  return {
+    id: row.id,
+    ws: row.workspace_id,
+    type: row.type,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    summary: row.summary,
+    evidence,
+    reasoning: row.reasoning || '',
+    confidence: row.confidence,
+    status: row.status,
+    proposedData,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: row.reviewed_at,
     createdAt: row.created_at,
   };
 }

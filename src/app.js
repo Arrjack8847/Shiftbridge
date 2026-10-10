@@ -32,6 +32,7 @@ let data = {
   messages: [],
   tasks: [],
   issues: [],
+  proposals: [],
   shifts: {},
   handovers: {},
 };
@@ -109,16 +110,33 @@ function profileScreen() {
   return `<section class="surface-page">${pageHeading('Profile & Workspaces', 'Your account preferences')}<div class="card"><div class="account-head">${personAvatar(identity?.userId, true)}<div><h2 style="margin:0 0 5px">${e(member(identity?.userId).name)}</h2><span class="muted small">${admin() ? 'Workspace administrator' : 'Team employee'} · Demo profile</span></div></div><div class="field-group"><label>Demo identity</label><p class="field-help">You are signed in as <strong>${e(member(identity?.userId).name)}</strong>. This is a simulated identity for the hackathon demo — it is <strong>not secure authentication</strong>.</p><button class="btn outline full" data-action="switch-identity">Switch demo identity</button></div></div><div class="section-title">My Workspaces</div><div class="card inline-list">${data.workspaces.map((w) => `<button class="list-row" data-action="switch-workspace" data-id="${e(w.id)}">${icon('coffee', 20)}<span class="grow"><strong>${e(w.name)}</strong><p>${e(w.type)}</p></span>${w.id === currentWorkspace ? icon('check', 19) : icon('chevron', 19)}</button>`).join('')}<button class="list-row" data-nav="workspace/create">${icon('plus')}<span class="grow"><strong>Create another workspace</strong></span>${icon('chevron', 17)}</button></div>${admin() ? `<div class="section-title">Administration</div><div class="card inline-list"><button class="list-row" data-nav="manage">${icon('manage')}<span class="grow"><strong>Manage ${e(workspace()?.name || '')}</strong><p>Issues, team, invites and AI settings</p></span>${icon('chevron', 17)}</button></div>` : ''}<p class="footer-note">Shared data is stored on the backend server. Your demo identity is stored locally on this device only.</p><button class="btn outline full" data-action="reset-demo">Reset demo data</button></section>`;
 }
 
-const managePages = [['attention', 'Needs Attention', 'alert', 'Review problems and approvals'], ['all-work', 'All Work', 'tasks', 'View every task and issue'], ['team', 'Team & Shifts', 'users', 'Members, roles and shift coverage'], ['invites', 'Invite Team', 'link', 'Invite employees to this workspace'], ['rules', 'AI & Rules', 'spark', 'Choose what AI may assign'], ['settings', 'Workspace Settings', 'settings', 'Business details and preferences']];
+const managePages = [['attention', 'Needs Attention', 'alert', 'Review problems and approvals'], ['proposals', 'Silent AI Proposals', 'spark', 'AI-suggested tasks and reviews'], ['all-work', 'All Work', 'tasks', 'View every task and issue'], ['team', 'Team & Shifts', 'users', 'Members, roles and shift coverage'], ['invites', 'Invite Team', 'link', 'Invite employees to this workspace'], ['rules', 'AI & Rules', 'spark', 'Choose what AI may assign'], ['settings', 'Workspace Settings', 'settings', 'Business details and preferences']];
+
+/** Render a single proposal card with evidence, reasoning, and approve/reject buttons. */
+function proposalCard(p) {
+  const typeLabels = { task_proposal: 'Task Proposal', completion_review: 'Completion Review', refusal: 'Protected Work Refusal' };
+  const typeBadge = { task_proposal: 'blue', completion_review: 'amber', refusal: 'red' };
+  const confidenceLabel = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence' };
+  const reviewed = p.status !== 'pending';
+  return `<div class="proposal-card ${reviewed ? 'reviewed' : ''}"><div class="proposal-header"><span class="badge ${typeBadge[p.type] || ''}">${e(typeLabels[p.type] || p.type)}</span>${badge(confidenceLabel[p.confidence] || p.confidence, p.confidence === 'high' ? '' : 'amber')}${reviewed ? badge(p.status.toUpperCase(), p.status === 'approved' ? '' : 'red') : ''}</div><p class="proposal-summary">${e(p.summary)}</p>${p.evidence && p.evidence.length ? `<div class="proposal-evidence"><div class="eyebrow">EVIDENCE</div><ul>${p.evidence.map((item) => `<li>${e(item)}</li>`).join('')}</ul></div>` : ''}${p.reasoning ? `<div class="proposal-reasoning"><div class="eyebrow">AI REASONING</div><p>${e(p.reasoning)}</p></div>` : ''}${!reviewed ? `<div class="proposal-actions"><button class="btn" data-action="approve-proposal" data-id="${e(p.id)}">${icon('check', 16)} Approve</button><button class="btn outline" data-action="reject-proposal" data-id="${e(p.id)}">Reject</button></div>` : `<div class="proposal-reviewed-note"><small>Reviewed by ${e(p.reviewedBy || 'manager')} · ${p.reviewedAt ? displayTime(p.reviewedAt) : ''}</small></div>`}</div>`;
+}
 
 function manageHome() {
-  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>Team members</small><b>${workspace()?.members.length || 0}</b>${badge('Workspace only')}</div></div><h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p></button>`).join('')}</div><p class="footer-note">All AI and attendance information is stored in the shared backend. WorkBuddy AI analysis is manually triggered.</p></section>`;
+  const pendingProposals = wsItems(data.proposals).filter((p) => p.status === 'pending');
+  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div></div>${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
 }
 
 function attentionScreen() {
   const open = wsItems(data.issues).filter((i) => i.status === 'open');
   const pending = wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status));
   return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Needs Attention', 'Only items that need a decision', badge(`${open.length + pending.length} pending`, 'amber'))}<h2 class="section-title">Open issues</h2><div class="stack">${open.length ? open.map((i) => `<button class="card list-row" data-nav="manage/issue/${e(i.id)}"><span class="avatar rose">${icon('alert')}</span><span class="grow"><strong>${e(i.title)}</strong><p>${e(i.description)}</p></span>${icon('chevron')}</button>`).join('') : empty('No open issues', 'Serious problems will appear here.')}</div><h2 class="section-title">Awaiting review</h2><div class="stack">${pending.length ? pending.map((t) => `<button class="card list-row" data-nav="task/${e(t.id)}"><span class="avatar orange">${icon('shield')}</span><span class="grow"><strong>${e(t.name)}</strong><p>Verification required · ${e(t.due)}</p></span>${icon('chevron')}</button>`).join('') : empty('Nothing to review', 'No approvals are pending right now.')}</div></section>`;
+}
+
+function proposalsScreen() {
+  const proposals = wsItems(data.proposals);
+  const pending = proposals.filter((p) => p.status === 'pending');
+  const reviewed = proposals.filter((p) => p.status !== 'pending');
+  return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Silent AI Proposals', 'AI-generated suggestions for your review', badge(`${pending.length} pending`, pending.length ? 'amber' : ''))}<div class="soft-panel info-row">${icon('spark', 18)}<span>The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Review each proposal carefully before approving or rejecting.</span></div><h2 class="section-title">Pending (${pending.length})</h2><div class="proposals-section">${pending.length ? pending.map(proposalCard).join('') : empty('No pending proposals', 'The AI has no proposals waiting for review.')}</div>${reviewed.length ? `<h2 class="section-title">Reviewed (${reviewed.length})</h2><div class="proposals-section">${reviewed.map(proposalCard).join('')}</div>` : ''}</section>`;
 }
 
 function allWorkScreen() {
@@ -213,6 +231,7 @@ function render() {
     else if (path === 'profile') view = profileScreen();
     else if (path === 'manage') view = manageHome();
     else if (path === 'manage/attention') view = attentionScreen();
+    else if (path === 'manage/proposals') view = proposalsScreen();
     else if (path === 'manage/all-work') view = allWorkScreen();
     else if (path === 'manage/team') view = teamScreen();
     else if (path === 'manage/rules') view = rulesScreen();
@@ -356,6 +375,33 @@ app.addEventListener('click', async (event) => {
         notify('Update failed: ' + err.message);
         await refreshWorkspaces();
       }
+    }
+    return;
+  }
+
+  // ── Approve / reject AI proposal ─────────────────────────────────
+  if (action === 'approve-proposal' || action === 'reject-proposal') {
+    if (!admin()) return notify('Only administrators can review AI proposals.');
+    const decision = action === 'approve-proposal' ? 'approve' : 'reject';
+    // Optimistic update.
+    const prop = data.proposals.find((p) => p.id === id);
+    if (prop) {
+      prop.status = decision === 'approve' ? 'approved' : 'rejected';
+      prop.reviewedBy = identity.userId;
+      prop.reviewedAt = Date.now();
+      render();
+    }
+    try {
+      await api.reviewProposal(id, { decision, reviewer: identity.userId });
+      notify(decision === 'approve' ? 'Proposal approved' : 'Proposal rejected');
+      // Refresh tasks since approving a task_proposal creates a task,
+      // and approving/rejecting a completion_review changes task status.
+      await Promise.all([refreshTasks(), refreshProposals()]);
+      render();
+    } catch (err) {
+      notify('Review failed: ' + err.message);
+      await refreshProposals();
+      render();
     }
     return;
   }
@@ -563,7 +609,7 @@ let sseCleanup = null;
 async function loadAllData() {
   try {
     await refreshWorkspaces();
-    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshShifts(), refreshHandovers()]);
+    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
   } catch (err) {
     connectionStatus = 'offline';
@@ -604,6 +650,14 @@ async function refreshIssues() {
   if (res.revision) serverRevision = res.revision;
 }
 
+async function refreshProposals() {
+  try {
+    const res = await api.getProposals(currentWorkspace);
+    data.proposals = res.proposals || [];
+    if (res.revision) serverRevision = res.revision;
+  } catch { /* proposals endpoint may not exist yet */ }
+}
+
 async function refreshShifts() {
   try {
     const res = await api.getShift(currentWorkspace);
@@ -620,7 +674,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -632,7 +686,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
       render();
