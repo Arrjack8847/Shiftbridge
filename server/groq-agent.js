@@ -301,6 +301,16 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
     return { skipped: true, reason: 'No GROQ_API_KEY set', jobId };
   }
 
+  // Already completed/retry-exhausted jobs should never repeat side effects.
+  const prior = d.prepare('SELECT status,attempts,max_attempts FROM ai_jobs WHERE id=?').get(jobId);
+  if (prior?.status === 'completed' || prior?.status === 'failed' ||
+      prior?.attempts >= prior?.max_attempts) {
+    return {skipped:true,reason:'Job already handled or retries exhausted',jobId};
+  }
+  if (prior?.status === 'processing' && !inFlight.has(messageId)) {
+    return {skipped:true,reason:'Job already processing; recovery handles stale jobs',jobId};
+  }
+
   // Prevent concurrent processing of the same message
   if (inFlight.has(messageId)) {
     return { skipped: true, reason: 'Already processing this message' };
@@ -308,28 +318,37 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
   inFlight.add(messageId);
 
   const startTime = Date.now();
+  const attempt = (prior?.attempts || 0) + 1;
 
   try {
-    // Update job to processing
-    updateJob(jobId, { status: 'processing', attempts: 1 });
+    updateJob(jobId, { status: 'processing', attempts: attempt });
+    // All model actions refer to this actual DB source message, not invented
+    // user/message IDs supplied by the model or the HTTP request.
+    const source = d.prepare('SELECT * FROM messages WHERE id=? AND workspace_id=?')
+      .get(messageId,workspaceId);
+    if (!source || source.user_id !== messageUser) throw new Error('Source message identity mismatch');
 
     // 1. Fetch workspace context in parallel
-    const [people, workspacesRes, messagesRes, tasksRes] = await Promise.all([
+    const [allPeople, workspacesRes, messagesRes, tasksRes, incidentsRes] = await Promise.all([
       getPeople(),
       apiGet('/workspaces'),
-      apiGet(`/workspaces/${workspaceId}/messages?limit=20`),
+      apiGet(`/workspaces/${workspaceId}/messages?latest=1&limit=20`),
       apiGet(`/workspaces/${workspaceId}/tasks`),
+      apiGet(`/workspaces/${workspaceId}/incident-context`),
     ]);
 
     const ws = workspacesRes.workspaces?.find(w => w.id === workspaceId);
-    const rules = ws?.rules || [];
+    if (!ws) throw new Error('Workspace is missing');
+    const people = (allPeople || []).filter(p=>(ws.members||[]).includes(p.id));
+    const rules = ws.rules || [];
     const messages = messagesRes.messages || [];
     const tasks = (tasksRes.tasks || []).filter(t => t.status !== 'done');
 
     // 2. Build prompts
     const systemPrompt = buildSystemPrompt(people, rules);
     const newMessage = { id: messageId, user: messageUser, body: messageBody };
-    const userPrompt = buildUserPrompt(messages, tasks, people, newMessage);
+    const userPrompt = buildUserPrompt(messages,tasks,people,newMessage,
+      incidentsRes.incidents||[],incidentsRes.feedbackExamples||[]);
 
     // 3. Call Groq API
     const groqStart = Date.now();
@@ -345,10 +364,11 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: 0.3,
-        max_tokens: 2048,
+        temperature: 0.1,
+        max_completion_tokens: 1500,
         response_format: { type: 'json_object' },
       }),
+      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
     });
 
     if (!groqRes.ok) {
@@ -370,16 +390,24 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
       throw new Error(`Invalid JSON from Groq: ${e.message}. Content: ${content.slice(0, 200)}`);
     }
 
-    const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
-    const analysis = parsed.analysis || '';
+    if (!Array.isArray(parsed.actions) || parsed.actions.length > GROQ_MAX_ACTIONS) {
+      throw new Error('Groq returned an invalid or oversized action list');
+    }
+    const actions = parsed.actions;
+    if (actions.some(a=>!a || typeof a !== 'object' || !GROQ_ACTION_TYPES.has(a.type))) {
+      throw new Error('Groq returned an unsupported action type');
+    }
+    const analysis = safeText(parsed.analysis,300);
 
     // 5. Execute each action via the ShiftBridge API
     const executionResults = [];
     for (const action of actions) {
       if (action.type === 'no_action') continue;
-      const execResult = await executeAction(workspaceId, action, messageId);
+      const execResult = await executeAction(workspaceId, action, source);
       executionResults.push(execResult);
     }
+    const rejected = executionResults.filter(x=>!x.ok);
+    if (rejected.length) throw new Error('Actions rejected: '+rejected.map(x=>x.type+': '+x.error).join('; ').slice(0,500));
 
     const totalLatency = Date.now() - startTime;
 
@@ -427,13 +455,12 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
     const totalLatency = Date.now() - startTime;
     const ts = Date.now();
 
-    // Update job to failed (will be retried)
-    const job = d.prepare('SELECT attempts FROM ai_jobs WHERE id = ?').get(jobId);
-    const attempts = (job?.attempts || 0) + 1;
-    const willRetry = attempts < 3;
+    // Each invocation counts as exactly one attempt. Idempotent endpoints
+    // ensure a retried job does not create duplicate tasks/incidents.
+    const willRetry = attempt < 3;
     updateJob(jobId, {
       status: willRetry ? 'pending' : 'failed',
-      attempts,
+      attempts: attempt,
       last_error: err.message.slice(0, 1000),
       latency_ms: totalLatency,
     });
@@ -468,8 +495,11 @@ export async function processPendingJobs() {
   if (!GROQ_ENABLED || !GROQ_API_KEY) return { processed: 0, reason: 'Groq disabled or no API key' };
 
   const d = getDB();
+  // Retry stale 'processing' jobs after a crash, not currently active ones.
+  d.prepare("UPDATE ai_jobs SET status='pending',last_error='Recovered stale Groq job' WHERE status='processing' AND updated_at < ?")
+    .run(Date.now() - (GROQ_TIMEOUT_MS + 15000));
   const pendingJobs = d.prepare(
-    `SELECT * FROM ai_jobs WHERE status IN ('pending', 'failed') AND attempts < max_attempts ORDER BY created_at ASC LIMIT 10`,
+    `SELECT * FROM ai_jobs WHERE status='pending' AND attempts < max_attempts ORDER BY created_at ASC LIMIT 10`,
   ).all();
 
   if (pendingJobs.length === 0) {
