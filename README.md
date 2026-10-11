@@ -30,6 +30,17 @@ The server starts on `0.0.0.0:3000`. The console will print:
 
 Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on phones connected to the same Wi-Fi.
 
+## Agent V2 — contextual incident memory (development branch)
+
+Agent V2 links source-backed chat messages to existing unresolved incidents, gives Tencent recent incident history and manager-labeled examples, and shows a reviewable incident conversation in the admin dashboard. It does **not** fine-tune Tencent weights, prove faults are real, or automatically clear protected work.
+
+**Documentation and Windows test commands:** [docs/agent-v2.md](docs/agent-v2.md).
+
+```powershell
+npm run check
+npm run test:agent-v2
+```
+
 ## Fast task and warning routing (Tencent test branch)
 
 When `AI_PROVIDER=tencent-local`:
