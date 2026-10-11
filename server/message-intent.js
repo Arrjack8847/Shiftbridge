@@ -15,6 +15,47 @@ const SAFETY = /\b(?:sparking|sparks|overheating|overheated|smoking|smoke|unsafe
 const INVENTORY = /\b(?:out\s+of\s+stock)\b/i;
 const INSTRUCTION = /\b(?:please|can\s+you|could\s+you|assign|ask\s+\w+\s+to|tell\s+\w+\s+to|need\s+(?:someone|\w+)\s+to|must\s+(?:fix|repair|inspect|check|replace))\b/i;
 
+
+/**
+ * Extract only very explicit, low-risk manager assignments.
+ * The server independently checks the actual manager, assignee membership,
+ * category permissions, and real message before writing a task.
+ * Anything complex or involving repairs/safety/spending goes to Tencent.
+ */
+export function parseFastRoutineTask(body) {
+  const text = String(body || '').trim();
+  const match = text.match(/^([a-z][a-z'-]{1,24})[,]?[ ]+(?:please[ ]+)?(restock|refill|clean|tidy|organize|prepare|count|label|wipe|sweep|sort)[ ]+(.+)$/i);
+  if (!match) return null;
+  if (/\\b(?:if|unless|because|after|when|while|not|never|don't|broken|repair|fix|electrical|danger|hazard|safe|unsafe|purchase|buy|pay|refund|replace|inspect|certify|approve)\\b/i.test(text)) return null;
+
+  const assignee = match[1].toLowerCase();
+  const verb = match[2].toLowerCase();
+  let object = match[3].trim().replace(/[.!]+$/, '').trim();
+  let due = 'Today';
+  const dueMatch = object.match(/\\s+(before|by)\\s+([^,;!?]+)$/i);
+  if (dueMatch) {
+    due = `${dueMatch[1][0].toUpperCase()}${dueMatch[1].slice(1).toLowerCase()} ${dueMatch[2].trim()}`;
+    object = object.slice(0, dueMatch.index).trim();
+  }
+
+  if (!object || object.length > 90 ||
+      /[?;:]/.test(object) || /\\b(?:and|or|also|then)\\b/i.test(object) ||
+      !/^[\\w\\s'-]+$/i.test(object)) return null;
+
+  const category = ['restock', 'refill', 'count', 'label', 'sort'].includes(verb)
+    ? 'inventory'
+    : ['clean', 'wipe', 'sweep', 'tidy'].includes(verb) ? 'cleaning'
+      : verb === 'prepare' ? 'opening' : 'routine';
+
+  return {
+    assignee,
+    name: `${verb[0].toUpperCase()}${verb.slice(1)} ${object}`,
+    due,
+    category,
+    priority: 'normal',
+  };
+}
+
 export function classifyIncomingMessage(body) {
   const text = String(body || '').trim().replace(/[\u2018\u2019]/g, "'");
   if (!text || ACKNOWLEDGMENT.test(text)) {
@@ -29,6 +70,8 @@ export function classifyIncomingMessage(body) {
   }
 
   if (!INCIDENT.test(text)) {
+    const task = parseFastRoutineTask(text);
+    if (task) return { route: 'routine-task', task, reason: 'explicit-low-risk-assignment' };
     return { route: 'ai', reason: 'no-certain-warning' };
   }
 
