@@ -30,6 +30,8 @@ The server starts on `0.0.0.0:3000`. The console will print:
 
 Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on phones connected to the same Wi-Fi.
 
+For Vercel/Render deployment and diagnosing **chat typing or message send errors**, see [Chat connectivity and deployment checks](docs/chat-connectivity.md). The chat transport works independently of Groq/Tencent AI.
+
 ## Agent V2 now uses Groq API by default
 
 **The default AI provider is `groq`, not Tencent CodeBuddy.** The existing AI features—contextual incident linking, warnings, hybrid completion claims, manager feedback and human verification—remain available. CodeBuddy is only a legacy opt-in fallback.
