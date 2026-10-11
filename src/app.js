@@ -336,6 +336,7 @@ function issueScreen(id) {
       '<div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn outline" data-action="feedback-correct" data-id="' + e(i.id) + '">Correct report</button>' +
       '<button class="btn outline" data-action="feedback-false" data-id="' + e(i.id) + '">False alarm</button></div></div>' : '';
   const linkedAnn = i.linkedAnnouncementId ? data.announcements.find((a) => a.id === i.linkedAnnouncementId) : null;
+  const attentionReview = attentionDecision('issue', i.id);
   const stages = [
     { key: 'reported', label: 'Reported', done: true, detail: i.reporterId ? `By ${member(i.reporterId).name}` : 'Detected by AI' },
     { key: 'acknowledged', label: 'Acknowledged', done: i.approved || ['acknowledged','in_progress','resolved'].includes(i.status), detail: i.approved ? 'Manager acknowledged' : 'Pending' },
@@ -343,7 +344,7 @@ function issueScreen(id) {
     { key: 'qualified_verification', label: 'Qualified verification', done: i.status === 'resolved' && !!i.qualifiedVerifier, detail: i.qualifiedVerifier ? `By ${member(i.qualifiedVerifier).name}` : 'Required' },
     { key: 'resolved', label: 'Resolved', done: i.status === 'resolved', detail: i.verifiedAt ? displayTime(i.verifiedAt) : '' },
   ];
-  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status !== 'resolved' ? 'red' : ''))}<div class="lifecycle-stages">${stages.map((s) => `<div class="lifecycle-stage ${s.done ? 'done' : ''}"><div class="lifecycle-dot ${s.done ? 'done' : ''}">${s.done ? icon('check', 12) : ''}</div><div class="grow"><strong>${e(s.label)}</strong>${s.detail ? `<small class="muted">${e(s.detail)}</small>` : ''}</div></div>`).join('')}</div><div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${i.issueType ? `<div class="soft-panel" style="margin-top:8px"><small>Type: ${e(i.issueType)}</small></div>` : ''}${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}${i.reporterId ? `<div class="row between" style="margin-top:8px"><span class="muted small">Reported by</span><span class="row">${personAvatar(i.reporterId)} ${e(member(i.reporterId).name)}</span></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div>${issueTimeline}${linkedAnn ? `<div class="card"><div class="card-title">Linked announcement</div><button class="list-row" data-nav="announcement/${encodeURIComponent(linkedAnn.id)}">${icon('megaphone')}<span class="grow"><strong>${e(linkedAnn.title)}</strong><small>${badge(linkedAnn.type.toUpperCase(), linkedAnn.type === 'safety' ? 'red' : 'blue')}</small></span>${icon('chevron', 17)}</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">The report remains unverified. Follow-up messages, scheduled inspections and employee completion claims do not prove that equipment is safe or a fault is resolved.</p></div>${feedbackCard}<div class="card"><div class="card-title">Administrator decision</div>${i.status !== 'resolved' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="attention-decision" data-type="issue" data-decision="approve" data-id="${e(i.id)}">${icon('shield', 17)} Approve</button><button class="btn outline full" style="margin-top:10px" data-action="attention-decision" data-type="issue" data-decision="disapprove" data-id="${e(i.id)}">Disapprove</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved.${i.qualifiedVerifier ? `<br/><small>Verified by: ${e(member(i.qualifiedVerifier).name)}</small>` : ''}${i.verificationEvidence ? `<br/><small>Evidence: ${e(i.verificationEvidence)}</small>` : ''}${i.evidence ? `<br/><small>Notes: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
+  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status !== 'resolved' ? 'red' : ''))}<div class="lifecycle-stages">${stages.map((s) => `<div class="lifecycle-stage ${s.done ? 'done' : ''}"><div class="lifecycle-dot ${s.done ? 'done' : ''}">${s.done ? icon('check', 12) : ''}</div><div class="grow"><strong>${e(s.label)}</strong>${s.detail ? `<small class="muted">${e(s.detail)}</small>` : ''}</div></div>`).join('')}</div><div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${i.issueType ? `<div class="soft-panel" style="margin-top:8px"><small>Type: ${e(i.issueType)}</small></div>` : ''}${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}${i.reporterId ? `<div class="row between" style="margin-top:8px"><span class="muted small">Reported by</span><span class="row">${personAvatar(i.reporterId)} ${e(member(i.reporterId).name)}</span></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div>${issueTimeline}${linkedAnn ? `<div class="card"><div class="card-title">Linked announcement</div><button class="list-row" data-nav="announcement/${encodeURIComponent(linkedAnn.id)}">${icon('megaphone')}<span class="grow"><strong>${e(linkedAnn.title)}</strong><small>${badge(linkedAnn.type.toUpperCase(), linkedAnn.type === 'safety' ? 'red' : 'blue')}</small></span>${icon('chevron', 17)}</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">The report remains unverified. Follow-up messages, scheduled inspections and employee completion claims do not prove that equipment is safe or a fault is resolved.</p></div>${feedbackCard}<div class="card"><div class="card-title">Administrator decision</div>${attentionReview ? `<div class="soft-panel">Last decision: <strong>${e(attentionReview.decision.toUpperCase())}</strong> by ${e(member(attentionReview.reviewer).name)}${attentionReview.note ? `<br/>Reason: ${e(attentionReview.note)}` : ''}</div>` : ''}${i.status !== 'resolved' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="attention-decision" data-type="issue" data-decision="approve" data-id="${e(i.id)}">${icon('shield', 17)} Approve</button><button class="btn outline full" style="margin-top:10px" data-action="attention-decision" data-type="issue" data-decision="disapprove" data-id="${e(i.id)}">Disapprove</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved.${i.qualifiedVerifier ? `<br/><small>Verified by: ${e(member(i.qualifiedVerifier).name)}</small>` : ''}${i.verificationEvidence ? `<br/><small>Evidence: ${e(i.verificationEvidence)}</small>` : ''}${i.evidence ? `<br/><small>Notes: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
 }
 
 function createWorkspaceScreen() {
@@ -975,6 +976,30 @@ app.addEventListener('submit', async (event) => {
     } catch (err) {
       notify('Creation failed: ' + err.message);
     }
+    return;
+  }
+
+  // ── Manager For Attention form ─────────────────────────────────────
+  if (form.id === 'attention-review-form') {
+    if (!admin() || !pendingAttention) return;
+    const { type, id, decision } = pendingAttention;
+    const body = {
+      reviewerId: identity.userId, decision, note: String(fields.note || '').trim(),
+      qualifiedVerifier: String(fields.qualifiedVerifier || '').trim(),
+      verificationEvidence: String(fields.verificationEvidence || '').trim(),
+    };
+    try {
+      const result = await api.reviewAttention(type, id, body);
+      pendingAttention = null;
+      activeDialog = '';
+      await Promise.all([refreshTasks(), refreshIssues(), refreshAttentionDecisions()]);
+      render();
+      notify(result.outcome === 'approved_pending_qualified_verification'
+        ? 'Manager approved, but qualified verification is still required.'
+        : result.outcome === 'blocker_still_open' ? 'Decision recorded; task remains blocked.'
+        : type === 'issue' ? 'Decision recorded; report remains open.'
+        : decision === 'approve' ? 'Task completion approved.' : 'Completion disapproved; task returned to work.');
+    } catch (err) { notify('Review failed: ' + err.message); }
     return;
   }
 
