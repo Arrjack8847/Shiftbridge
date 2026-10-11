@@ -803,6 +803,127 @@ app.put('/api/issues/:id', (req, res) => {
   res.json(mapIssue(updated));
 });
 
+// ── Unified "For Attention" manager decisions ──────────────────────────
+// These decisions are NOT the same as task completion or safety clearance.
+// Store the complete review history in the existing audited/persisted log
+// (also mirrored to Supabase), without introducing another cloud migration.
+app.get('/api/workspaces/:workspace/attention-decisions', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const rows = d.prepare(
+    "SELECT entity_type, entity_id, actor, details, created_at FROM audit_log WHERE workspace_id = ? AND action = 'attention_reviewed' ORDER BY created_at DESC, rowid DESC"
+  ).all(req.workspaceId);
+  const latest = new Map();
+  for (const row of rows) {
+    const key = row.entity_type + ':' + row.entity_id;
+    if (latest.has(key)) continue;
+    let details;
+    try { details = JSON.parse(row.details || '{}'); } catch { continue; }
+    latest.set(key, {
+      type: row.entity_type, entityId: row.entity_id,
+      decision: details.decision, note: details.note || '',
+      outcome: details.outcome || '', qualifiedVerifier: details.qualifiedVerifier || '',
+      reviewer: row.actor, reviewedAt: row.created_at,
+    });
+  }
+  res.json({ decisions: [...latest.values()], revision: currentRevision() });
+});
+
+/** Managers can approve/disapprove every reported issue and review/blocked task.
+ *  Approval of a safety report acknowledges follow-up; it cannot resolve it.
+ *  Protected task completion needs named qualified verification + evidence.
+ *  Disapproval never silently clears a safety/blocker incident.
+ */
+app.post('/api/attention/:type/:id/review', (req, res) => {
+  const { type, id } = req.params;
+  const { decision, reviewerId, note = '', qualifiedVerifier = '', verificationEvidence = '' } = req.body || {};
+  if (!['issue', 'task'].includes(type)) return res.status(400).json({ error: 'Review type must be issue or task' });
+  if (!['approve', 'disapprove'].includes(decision)) return res.status(400).json({ error: 'Decision must be approve or disapprove' });
+  if (typeof note !== 'string' || note.length > 2000) return res.status(400).json({ error: 'Invalid review note' });
+  const cleanNote = note.trim();
+  if (decision === 'disapprove' && cleanNote.length < 3) {
+    return res.status(400).json({ error: 'A reason is required when disapproving' });
+  }
+  const verifier = typeof qualifiedVerifier === 'string' ? qualifiedVerifier.trim() : '';
+  const evidence = typeof verificationEvidence === 'string' ? verificationEvidence.trim() : '';
+  if (verifier.length > 150 || evidence.length > 2000) {
+    return res.status(400).json({ error: 'Verification details are too long' });
+  }
+  if ((verifier && !evidence) || (!verifier && evidence)) {
+    return res.status(400).json({ error: 'Qualified verifier and verification evidence must both be provided' });
+  }
+
+  const d = getDB();
+  const table = type === 'issue' ? 'issues' : 'tasks';
+  const row = d.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: type + ' not found' });
+  if (!reviewerId || reviewerId !== getWorkspaceManager(d, row.workspace_id)) {
+    return res.status(403).json({ error: 'Only the workspace demo manager can review For Attention items' });
+  }
+  if (type === 'issue' && row.status === 'resolved') {
+    return res.status(409).json({ error: 'Resolved issues cannot be reviewed again' });
+  }
+  if (type === 'task' && !['review', 'blocked'].includes(row.status)) {
+    return res.status(409).json({ error: 'Only review or blocked tasks can receive an attention decision' });
+  }
+
+  const ts = Date.now();
+  let outcome = 'decision_recorded';
+  const tx = d.transaction(() => {
+    if (type === 'issue') {
+      // Acknowledgment of a request is distinct from confirmed safe resolution.
+      // Disapproving a request leaves the report open for follow-up.
+      if (decision === 'approve') {
+        const next = ['reported', 'open'].includes(row.status) ? 'acknowledged' : row.status;
+        d.prepare('UPDATE issues SET approved = 1, status = ? WHERE id = ?')
+          .run(next, id);
+        outcome = 'follow_up_authorized_unresolved';
+      } else {
+        d.prepare('UPDATE issues SET approved = 0 WHERE id = ?').run(id);
+        outcome = 'request_disapproved_issue_still_open';
+      }
+    } else if (row.status === 'blocked') {
+      // The work remains blocked until an explicit unblock action. Neither
+      // decision claims the blocker is fixed.
+      outcome = 'blocker_still_open';
+    } else if (decision === 'disapprove') {
+      d.prepare("UPDATE tasks SET status = 'doing', completion = ?, updated_at = ? WHERE id = ?")
+        .run('Manager disapproved completion: ' + cleanNote.slice(0, 400), ts, id);
+      outcome = 'completion_disapproved_returned_to_work';
+    } else if (isProtectedTask(row)) {
+      if (verifier && evidence) {
+        d.prepare("UPDATE tasks SET status = 'done', completion = ?, updated_at = ? WHERE id = ?")
+          .run('Qualified verification by ' + verifier + ': ' + evidence.slice(0, 800), ts, id);
+        outcome = 'qualified_verification_recorded_task_done';
+      } else {
+        // Manager approval alone is NOT a verification certificate.
+        outcome = 'approved_pending_qualified_verification';
+      }
+    } else {
+      d.prepare("UPDATE tasks SET status = 'done', completion = ?, updated_at = ? WHERE id = ?")
+        .run('Manager-approved self-reported completion' + (cleanNote ? ': ' + cleanNote.slice(0, 300) : ''), ts, id);
+      outcome = 'routine_completion_approved';
+    }
+    d.prepare(
+      'INSERT INTO audit_log (id,workspace_id,action,entity_type,entity_id,actor,details,created_at) VALUES (?,?,?,?,?,?,?,?)'
+    ).run(
+      'al_' + ts.toString(36) + '_' + Math.random().toString(36).slice(2, 8),
+      row.workspace_id, 'attention_reviewed', type, id, reviewerId,
+      JSON.stringify({ decision, note: cleanNote, outcome,
+        qualifiedVerifier: outcome === 'qualified_verification_recorded_task_done' ? verifier : '',
+        verificationEvidence: outcome === 'qualified_verification_recorded_task_done' ? evidence : '' }),
+      ts,
+    );
+    bumpRevision();
+  });
+  tx();
+  notifySSE(row.workspace_id, { type: 'attention', action: 'reviewed', entityType: type, id, decision });
+  const updated = d.prepare('SELECT * FROM ' + table + ' WHERE id = ?').get(id);
+  res.json({
+    decision, outcome, reviewer: reviewerId, reviewedAt: ts,
+    item: type === 'issue' ? mapIssue(updated) : mapTask(updated),
+  });
+});
+
 // ── Rules ───────────────────────────────────────────────────────────
 
 /** PUT /api/rules/:id — toggle a rule's allowed state. */
@@ -1045,6 +1166,7 @@ app.put('/api/proposals/:id/review', (req, res) => {
   const row = d.prepare('SELECT * FROM ai_proposals WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'proposal not found' });
   if (row.status !== 'pending') return res.status(409).json({ error: 'proposal already reviewed' });
+  if (reviewer !== getWorkspaceManager(d, row.workspace_id)) return res.status(403).json({ error: 'Only workspace demo manager can review proposals' });
 
   const ts = Date.now();
   const newStatus = decision === 'approve' ? 'approved' : 'rejected';
