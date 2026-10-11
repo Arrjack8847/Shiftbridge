@@ -49,6 +49,11 @@ export default {
 
     try{
       const response=await fetch(upstream,options);
+      // If Render serves an HTML 404, surface a JSON diagnostic rather than
+      // showing a generic Vercel NOT_FOUND page in the chat client.
+      if(response.status===404&&!(response.headers.get("content-type")||"").includes("json")){
+        return json({error:"Render returned an HTML 404 for the ShiftBridge API. Confirm the Render service runs this repository with npm start and exposes /api/health.",code:"BACKEND_ROUTE_NOT_FOUND"},502);
+      }
       const outgoingHeaders=new Headers();
       for(const name of ["content-type","cache-control"]){
         const value=response.headers.get(name);
