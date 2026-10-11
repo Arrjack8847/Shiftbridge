@@ -30,6 +30,19 @@ The server starts on `0.0.0.0:3000`. The console will print:
 
 Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on phones connected to the same Wi-Fi.
 
+## Fast task and warning routing (Tencent test branch)
+
+When `AI_PROVIDER=tencent-local`:
+- Clear operational reports such as "The printer is broken", "Machine 2 is leaking", "The POS is offline", or "Gas leak in the kitchen" are written immediately as **unverified, reported issues**. The source chat message, real author, timestamp and audit trail are preserved; safety reports receive high severity and still require a human check. No AI action authorizes repair or certifies safety.
+- Simple, explicit, low-risk **manager** assignments such as "Emma, please restock the cups before 5 PM" use the already-validated `/manager-task` endpoint without starting the AI process. The endpoint enforces manager role, assignee membership and category rules. Complex work, repairs, spending and safety instructions still go to Tencent.
+- Greetings/acknowledgments skip Tencent entirely.
+- Unclear statements (for example "The machine is making a strange noise") still go to Tencent, which can use `report_chat_issue` to create a source-verified **unverified** issue. Question-only, hypothetical, resolved or negated incidents are not auto-reported by the fast detector.
+- The agent never posts messages into the shared chat. A fast issue or task is announced to clients through the existing SSE stream. Work cannot be closed without the existing verification policy.
+
+These are conservative recognition rules and examples, **not Tencent model fine-tuning**. Improve accuracy by reviewing managers' false-positive and false-negative examples, adding regression tests, and only then changing the rules or AI instructions. The current branch does not automatically retrain model weights.
+
+Test the fast routing rules: `npm run test:messages`. Test Tencent's adapter: `npm run test:tencent`. The automated Tencent tests do not call a live AI account; validate genuine task/issue creation separately in the local running app. For live tool writes in the dedicated test repository set `CODEBUDDY_CLI_MCP_TARGET=http://127.0.0.1:3000/api` matching `SHIFTBRIDGE_API`, and `CODEBUDDY_CLI_ENABLE_WRITES=true`.
+
 ## Silent AI Agent (MCP Integration)
 
 The Silent AI agent connects via **Model Context Protocol (MCP)** with stdio transport, using the official `@modelcontextprotocol/sdk`. It monitors workspace activity and creates proposals that managers review in the dashboard.
