@@ -272,6 +272,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'report_chat_issue',
+    description: 'Record an unverified, currently occurring equipment/stock/safety problem claimed in a real workspace chat message. Only use for actual operational problems, not hypothetical, resolved, negated, personal or question-only text. Source message author is read from the backend (never invented); recording creates a reported issue, NOT proof of a defect or permission to repair.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workspace: { type: 'string', description: 'Workspace ID' },
+        messageId: { type: 'string', description: 'ID of the real message that describes the incident' },
+        issueType: { type: 'string', enum: ['equipment', 'inventory', 'safety', 'general'], default: 'general' },
+      },
+      required: ['workspace', 'messageId'],
+    },
+  },
+  {
     name: 'propose_announcement_draft',
     description: 'Draft an announcement based on workspace data, particularly open issues. The AI analyzes reported issues, their severity, and their type to produce a suggested announcement title, body, and type. This tool does NOT publish the announcement — it returns a draft that the manager must review and publish through the frontend. The AI never publishes announcements directly. If a linked issue is specified, the draft will reference that issue. This tool supports Workflow C: manager-controlled announcements.',
     inputSchema: {
@@ -626,6 +639,40 @@ async function create_manager_task(args) {
   }
 }
 
+
+async function report_chat_issue(args) {
+  const { workspace, messageId, issueType = 'general' } = args;
+  if (!workspace || !messageId) return { error: 'workspace and messageId are required' };
+  if (!['equipment', 'inventory', 'safety', 'general'].includes(issueType)) {
+    return { error: 'Invalid issueType' };
+  }
+  try {
+    // Read the actual message and author from ShiftBridge: the LLM cannot
+    // forge an employee reporter ID or invent a source message.
+    const msg = await apiRequest('GET',
+      `/workspaces/${encodeURIComponent(workspace)}/messages/${encodeURIComponent(messageId)}`);
+    if (!msg?.id || !msg?.user || !msg?.body) {
+      return { error: 'Source message is missing identity or text' };
+    }
+    const issue = await apiRequest('POST',
+      `/workspaces/${encodeURIComponent(workspace)}/report-issue`, {
+        messageId: msg.id,
+        reporterId: msg.user,
+        title: `Possible ${issueType} issue: ${msg.body.trim().replace(/\s+/g, ' ').slice(0, 120)}`,
+        issueType,
+        detectedByAi: true,
+      });
+    return {
+      message: issue.duplicate ? 'Issue was already reported; no duplicate created'
+        : 'Unverified issue reported from the real chat message for human review',
+      issue,
+      duplicate: Boolean(issue.duplicate),
+    };
+  } catch (err) {
+    return { error: err.message, workspace, messageId };
+  }
+}
+
 async function get_reported_issues(args) {
   const { workspace, status = 'open' } = args;
 
@@ -789,6 +836,7 @@ const TOOL_HANDLERS = {
   propose_chat_completion,
   create_manager_task,
   get_reported_issues,
+  report_chat_issue,
   propose_announcement_draft,
 };
 
