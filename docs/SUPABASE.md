@@ -1,38 +1,35 @@
-# ShiftBridge + Supabase (safe rollout)
+# ShiftBridge Supabase integration
 
-Database project: **hackathon** (`jpkobdggdsuinsquchxp`, ap-northeast-1).
+**Project:** [hackathon](https://supabase.com/dashboard/project/jpkobdggdsuinsquchxp), `https://jpkobdggdsuinsquchxp.supabase.co`.
 
-## Status
-- Cloud schema has 17 isolated `sb_*` tables matching the current SQLite model, including AI jobs, completion claims, audit history and announcements.
-- Row level security is enabled on **all** cloud tables. Anonymous and authenticated browser roles have **no table privileges and no policies**.
-- SQLite remains the live source of truth. Supabase is **not** wired to live API handlers yet.
-- The existing frontend and tests continue to use Express and local SQLite. No auth is added for the hackathon demo.
-- The data snapshot script is opt-in and not a realtime migration or two-way sync.
+## Two modes
 
-## Setup on your laptop
+- Default `SHIFTBRIDGE_STORAGE=sqlite`: identical existing local behavior.
+- Opt-in `SHIFTBRIDGE_STORAGE=supabase`: one-instance hackathon persistence adapter. The app runs existing SQLite transactions and mirrors all 19 tables to Supabase approximately every 3 seconds, and restores cloud state before serving requests on subsequent boot. **Not** native Postgres transactions or multi-instance-safe replication. Cloud backups are eventually consistent, and in-flight changes may be lost on crash. Never run two backend instances at once.
 
-1. Open the [hackathon API settings](https://supabase.com/dashboard/project/jpkobdggdsuinsquchxp/settings/api-keys) and create/copy a **secret** API key (not publishable).
-2. At project root, add the following to local `.env` (not tracked by Git):
-   ```dotenv
-   SUPABASE_URL=https://jpkobdggdsuinsquchxp.supabase.co
-   SUPABASE_SECRET_KEY=YOUR_SERVER_SECRET_KEY
-   ```
-3. Run `npm run supabase:check`. This tests read-only connection.
-4. To copy your existing SQLite rows up, add `SUPABASE_SYNC_CONFIRM=YES` to your local environment temporarily, then run `npm run supabase:sync`. Remove that flag afterwards.
+All `sb_*` tables have RLS enabled and no public grants. The user-provided publishable key is NOT enough for backend writes.
 
-The snapshot **upserts** rows by primary key, so existing remote rows with the same IDs can be overwritten. It does not delete remote records. Use it only when the local SQLite data is the data you intend to upload. The script may partially upload before failure; retry after correcting the issue.
+## Render Environment
 
-## Why this is staged
-The Express endpoints and MCP tools use **synchronous better-sqlite3 queries** in multiple modules. Replacing their database calls with asynchronous Supabase REST requests without a refactor would break task completion, manager approval, AI queue processing, and existing tests. This stage safely prepares the cloud data model and transfers a snapshot.
+```dotenv
+SHIFTBRIDGE_STORAGE=supabase
+SUPABASE_URL=https://jpkobdggdsuinsquchxp.supabase.co
+SUPABASE_SECRET_KEY=your_sb_secret_key_from_supabase_dashboard
+SUPABASE_SYNC_INTERVAL_MS=3000
+AI_PROVIDER=groq
+GROQ_API_KEY=your_groq_key
+```
 
-For **live shared deployment**, next build a Postgres-backed repository/data-access layer, convert routes and agent tools to async database calls, add transaction-safe task verification and job claiming, then switch the backend storage provider. Do not claim multiple-server real-time sync from this snapshot.
+**Only** set `SUPABASE_SECRET_KEY` in Render's environment settings, not in source, frontend, GitHub, or a chat message. [Supabase secret key dashboard](https://supabase.com/dashboard/project/jpkobdggdsuinsquchxp/settings/api-keys).
 
-## Security before public deployment
-The demo currently allows choosing someone else's identity, and role-specific endpoints trust demo identities. **Do not publish the Express API unprotected**. Before public deployment add real authentication and verify workspace membership and administrative role server-side; use RLS for user-scoped direct Supabase reads only after authentication is designed. Keep `SUPABASE_SECRET_KEY` and `GROQ_API_KEY` exclusively server-side, never in source code or the browser.
+Startup will fail rather than accidentally serve an empty demo if configured cloud access fails. Once started, `GET /api/health` includes `persistence` mode, last successful sync and last error. Test with a message, a task update, then inspect the matching `sb_messages` and `sb_tasks` tables in Supabase.
 
-## Files
-- `supabase/migrations/20261011030000_shiftbridge_supabase_foundation.sql`: initial cloud schema
-- `server/supabase-check.js`: cloud connection test
-- `server/supabase-sync.js`: explicit SQLite to Supabase snapshot
+To run locally, add the same values to gitignored `.env`, then `npm run dev`.
 
-Supabase dashboard: https://supabase.com/dashboard/project/jpkobdggdsuinsquchxp
+## Architecture caveats
+
+- No authentication in the demo. Anyone with access to the public API can impersonate demo users; **do not expose the app with sensitive data** without adding backend access controls.
+- One backend writer only. SQLite provides existing task verification transactions locally, but Supabase snapshots are not an atomic remote transaction. Never scale Render to multiple instances with this adapter.
+- Cloud sync is a snapshot mechanism, not a guaranteed durable queue. For genuine production use, migrate operations and protected-work verification to native Postgres transactions, implement real authentication/authorization and a durable job queue.
+- Existing snapshot utility `npm run supabase:sync` is an explicit one-time manual copy; the opt-in runtime adapter is separate.
+- Table additions for Agent V2: `sb_issue_message_links`, `sb_ai_feedback`, plus issue entity fields.

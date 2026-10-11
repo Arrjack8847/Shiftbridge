@@ -38,6 +38,7 @@ import {
   mapAnnouncementRevision,
 } from './db.js';
 import { seedDatabase } from './seed.js';
+import { initializeCloud, startCloudSync, cloudStatus } from './supabase-runtime.js';
 import { ruleDefaults } from './rule-defaults.js';
 // ── AI Provider Selection ───────────────────────────────────────────
 // AI_PROVIDER controls which AI backend is used:
@@ -73,9 +74,12 @@ const ROOT = resolve(__dirname, '..'); // project root (parent of server/)
 const PORT = Number(process.env.PORT || 3000);
 const HOST = '0.0.0.0';
 
-// ── Boot ──────────────────────────────────────────────────────────
+// ── Boot: remote recovery completes BEFORE serving requests or seeding.
+// Explicit supabase mode fails closed if credentials or remote are unavailable.
 initSchema();
+await initializeCloud();
 seedDatabase();
+startCloudSync();
 
 const app = express();
 app.use(cors());
@@ -2371,7 +2375,7 @@ app.post('/api/reset', (_req, res) => {
 
 // ── Health check ────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, revision: currentRevision() });
+  res.json({ ok: true, revision: currentRevision(), persistence: cloudStatus() });
 });
 
 // ── Static frontend & SPA fallback (registered LAST so API routes win) ─
