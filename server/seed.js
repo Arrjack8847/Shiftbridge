@@ -104,11 +104,11 @@ function seedWorkspaces(d) {
 
   // ── Issues ───────────────────────────────────────────────────────
   d.prepare(
-    `INSERT OR IGNORE INTO issues (id, workspace_id, title, description, severity, status, source, created_by, requires_approval, approved, evidence, resolved_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO issues (id, workspace_id, title, description, severity, status, source, created_by, requires_approval, approved, evidence, resolved_at, created_at, entity_key, last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     'i1', 'daily', 'Machine 2 is leaking',
     'Reported repeatedly. Inspection and safe-to-use sign-off are required.',
-    'high', 'open', 'm1', 'demo', 1, 0, '', null, now,
+    'high', 'open', 'm1', 'demo', 1, 0, '', null, now, 'machine-2', now,
   );
 
   bumpRevision();
