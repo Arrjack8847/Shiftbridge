@@ -18,6 +18,8 @@ import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { PHOTO_BUCKET, PHOTO_TYPES, parsePhoto, uploadPhoto, readPhoto, deletePhoto } from './photo-storage.js';
 import { existsSync } from 'node:fs';
 
 import {
@@ -293,6 +295,78 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   });
 });
 
+
+// ── Private image attachments ─────────────────────────────────────
+app.get('/api/workspaces/:workspace/attachments', validateWorkspace, (req, res) => {
+  const attachments = getDB().prepare(`SELECT id,message_id,uploaded_by,original_name,content_type,size_bytes,created_at
+    FROM message_attachments WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 500`)
+    .all(req.workspaceId).map(row => ({
+      id: row.id, messageId: row.message_id, uploadedBy: row.uploaded_by,
+      originalName: row.original_name, contentType: row.content_type,
+      sizeBytes: row.size_bytes, createdAt: row.created_at,
+    }));
+  res.json({ attachments });
+});
+
+app.post('/api/workspaces/:workspace/messages/:messageId/attachments', validateWorkspace, async (req, res) => {
+  if (process.env.SHIFTBRIDGE_STORAGE !== 'supabase') {
+    return res.status(503).json({ error: 'Photo uploads require Supabase storage mode' });
+  }
+  const { userId, contentType, originalName, data } = req.body || {};
+  const db = getDB();
+  const message = db.prepare('SELECT id,user_id FROM messages WHERE id=? AND workspace_id=?')
+    .get(req.params.messageId, req.workspaceId);
+  if (!message) return res.status(404).json({ error: 'Message not found in workspace' });
+  if (!validShiftMember(db, req.workspaceId, userId) || message.user_id !== userId) {
+    return res.status(403).json({ error: 'Only the message author may attach a photo' });
+  }
+  if (!PHOTO_TYPES[contentType] || typeof originalName !== 'string' || !originalName.trim()) {
+    return res.status(400).json({ error: 'A valid JPEG, PNG or WebP file is required' });
+  }
+  if (db.prepare('SELECT 1 FROM message_attachments WHERE workspace_id=? AND message_id=?')
+    .get(req.workspaceId, message.id)) {
+    return res.status(409).json({ error: 'Only one photo per message is supported' });
+  }
+  let bytes;
+  try { bytes = parsePhoto(data, contentType); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
+  const attachmentId = randomUUID();
+  const path = [req.workspaceId, message.id, attachmentId + '.' + PHOTO_TYPES[contentType]].join('/');
+  // The trusted server is the only client using the secret key and private bucket.
+  try {
+    await uploadPhoto(path, bytes, contentType);
+    try {
+      db.prepare(`INSERT INTO message_attachments
+        (id,workspace_id,message_id,uploaded_by,storage_bucket,storage_path,original_name,content_type,size_bytes,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`)
+        .run(attachmentId, req.workspaceId, message.id, userId, PHOTO_BUCKET, path,
+          originalName.trim().slice(0, 120), contentType, bytes.length, Date.now());
+    } catch (error) {
+      await deletePhoto(path);
+      throw error;
+    }
+    bumpRevision();
+    notifySSE(req.workspaceId, { type: 'attachment', messageId: message.id });
+    res.status(201).json({ id: attachmentId, messageId: message.id });
+  } catch (error) {
+    console.error('[attachments] upload failed:', error.message);
+    res.status(502).json({ error: 'Photo could not be saved. Please retry.' });
+  }
+});
+
+app.get('/api/workspaces/:workspace/attachments/:attachmentId/content', validateWorkspace, async (req, res) => {
+  const row = getDB().prepare(`SELECT storage_path,content_type FROM message_attachments
+    WHERE id=? AND workspace_id=?`).get(req.params.attachmentId, req.workspaceId);
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+  try {
+    const bytes = await readPhoto(row.storage_path);
+    res.set('Cache-Control', 'private, no-store');
+    res.type(row.content_type).send(bytes);
+  } catch (error) {
+    console.error('[attachments] retrieval failed:', error.message);
+    res.status(502).json({ error: 'Photo is temporarily unavailable' });
+  }
+});
 
 // ── Zero-model latency path: report explicit operational warnings ──
 // A report is an unverified employee claim, NOT confirmation of damage/safety.
@@ -745,33 +819,76 @@ app.put('/api/rules/:id', (req, res) => {
   res.json(mapRule(d.prepare('SELECT * FROM rules WHERE id = ?').get(req.params.id)));
 });
 
-// ── Shifts ──────────────────────────────────────────────────────────
+// ── Shifts (person-scoped, with auditable sessions) ────────────────
+function validShiftMember(db, workspaceId, personId) {
+  return typeof personId === 'string' && !!db.prepare(
+    'SELECT 1 FROM workspace_members WHERE workspace_id = ? AND person_id = ?'
+  ).get(workspaceId, personId);
+}
 
-/** GET /api/workspaces/:workspace/shift — get current shift state. */
+/** GET current shift state for the selected demo employee. */
 app.get('/api/workspaces/:workspace/shift', validateWorkspace, (req, res) => {
-  const d = getDB();
-  const row = d.prepare('SELECT * FROM shifts WHERE workspace_id = ?').get(req.workspaceId);
-  if (!row) return res.json({ on: false, since: null });
-  res.json({ on: row.clocked_in === 1, since: row.since, personId: row.person_id });
+  const personId = req.query.personId || 'jack';
+  const db = getDB();
+  if (!validShiftMember(db, req.workspaceId, personId)) {
+    return res.status(400).json({ error: 'Employee is not a workspace member' });
+  }
+  const row = db.prepare('SELECT * FROM shifts WHERE workspace_id = ? AND person_id = ?')
+    .get(req.workspaceId, personId);
+  res.json({ on: row?.clocked_in === 1, since: row?.since || null, personId });
 });
 
-/** PUT /api/workspaces/:workspace/shift — toggle clock in/out. */
+/** Atomic clock-in/out and history updates. Two employees no longer overwrite each other. */
 app.put('/api/workspaces/:workspace/shift', validateWorkspace, (req, res) => {
-  const { personId = 'jack' } = req.body;
-  const d = getDB();
-  const row = d.prepare('SELECT * FROM shifts WHERE workspace_id = ?').get(req.workspaceId);
-  const newState = row ? (row.clocked_in === 1 ? 0 : 1) : 1;
-  const since = newState === 1 ? Date.now() : null;
-  const person = personId;
-
-  if (row) {
-    d.prepare('UPDATE shifts SET clocked_in = ?, since = ?, person_id = ? WHERE workspace_id = ?').run(newState, since, person, req.workspaceId);
-  } else {
-    d.prepare('INSERT INTO shifts (workspace_id, person_id, clocked_in, since) VALUES (?, ?, ?, ?)').run(req.workspaceId, person, newState, since);
+  const personId = req.body?.personId;
+  const db = getDB();
+  if (!validShiftMember(db, req.workspaceId, personId)) {
+    return res.status(400).json({ error: 'Employee is not a workspace member' });
   }
-  bumpRevision();
-  notifySSE(req.workspaceId, { type: 'shift', on: newState === 1, since });
-  res.json({ on: newState === 1, since, personId: person });
+  const now = Date.now();
+  const result = db.transaction(() => {
+    const previous = db.prepare('SELECT clocked_in FROM shifts WHERE workspace_id = ? AND person_id = ?')
+      .get(req.workspaceId, personId);
+    const on = previous?.clocked_in !== 1;
+    db.prepare(`INSERT INTO shifts(workspace_id,person_id,clocked_in,since)
+      VALUES(?,?,?,?) ON CONFLICT(workspace_id,person_id)
+      DO UPDATE SET clocked_in=excluded.clocked_in,since=excluded.since`)
+      .run(req.workspaceId, personId, on ? 1 : 0, on ? now : null);
+    if (on) {
+      const open = db.prepare(`SELECT id FROM shift_sessions
+        WHERE workspace_id=? AND person_id=? AND clock_out_at IS NULL`)
+        .get(req.workspaceId, personId);
+      if (!open) {
+        db.prepare(`INSERT INTO shift_sessions(id,workspace_id,person_id,clock_in_at,clock_out_at,created_at)
+          VALUES(?,?,?,?,NULL,?)`)
+          .run(randomUUID(), req.workspaceId, personId, now, now);
+      }
+    } else {
+      db.prepare(`UPDATE shift_sessions SET clock_out_at=?
+        WHERE workspace_id=? AND person_id=? AND clock_out_at IS NULL`)
+        .run(now, req.workspaceId, personId);
+    }
+    bumpRevision();
+    return { on, since: on ? now : null, personId };
+  })();
+  notifySSE(req.workspaceId, { type: 'shift', personId });
+  res.json(result);
+});
+
+app.get('/api/workspaces/:workspace/shift-sessions', validateWorkspace, (req, res) => {
+  const personId = req.query.personId;
+  const db = getDB();
+  if (!validShiftMember(db, req.workspaceId, personId)) {
+    return res.status(400).json({ error: 'Employee is not a workspace member' });
+  }
+  const sessions = db.prepare(`SELECT id,person_id,clock_in_at,clock_out_at
+    FROM shift_sessions WHERE workspace_id=? AND person_id=?
+    ORDER BY clock_in_at DESC LIMIT 100`)
+    .all(req.workspaceId, personId).map((row) => ({
+      id: row.id, personId: row.person_id,
+      clockInAt: row.clock_in_at, clockOutAt: row.clock_out_at,
+    }));
+  res.json({ sessions });
 });
 
 // ── Handovers ───────────────────────────────────────────────────────

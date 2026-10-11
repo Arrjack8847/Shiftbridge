@@ -134,6 +134,15 @@ export function seedDatabase() {
   initSchema();
   seedPeople(d);
   seedWorkspaces(d);
+  // A freshly seeded clocked-in demo employee must also have an open history session.
+  d.prepare(`INSERT OR IGNORE INTO shift_sessions(id,workspace_id,person_id,clock_in_at,clock_out_at,created_at)
+    SELECT 'legacy:' || s.workspace_id || ':' || s.person_id,
+      s.workspace_id,s.person_id,s.since,NULL,s.since
+    FROM shifts s WHERE s.clocked_in = 1 AND s.since IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM shift_sessions h WHERE h.workspace_id=s.workspace_id AND h.person_id=s.person_id
+      AND h.clock_out_at IS NULL
+    )`).run();
   bumpRevision();
 }
 

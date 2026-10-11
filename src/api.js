@@ -28,6 +28,17 @@ async function request(method, path, body = null) {
 const api = {
   // ── People ────────────────────────────────────────────────────────
   getPeople: () => request('GET', '/people'),
+  getAttachments: (ws) => request('GET', `/workspaces/${encodeURIComponent(ws)}/attachments`),
+  attachmentSrc: (ws, id) => `/api/workspaces/${encodeURIComponent(ws)}/attachments/${encodeURIComponent(id)}/content`,
+  uploadMessageAttachment: async (ws, msgId, file, userId) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.length > 1300000) throw new Error('Photos must be no larger than 1.3 MB');
+    let binary = '';
+    for (let n = 0; n < bytes.length; n += 8192) binary += String.fromCharCode(...bytes.subarray(n, n + 8192));
+    return request('POST', `/workspaces/${encodeURIComponent(ws)}/messages/${encodeURIComponent(msgId)}/attachments`, {
+      userId, originalName: file.name, contentType: file.type, data: btoa(binary),
+    });
+  },
 
   // ── Workspaces ─────────────────────────────────────────────────────
   getWorkspaces: () => request('GET', '/workspaces'),
@@ -58,7 +69,8 @@ const api = {
   updateRule: (id, allowed) => request('PUT', `/rules/${id}`, { allowed }),
 
   // ── Shifts ────────────────────────────────────────────────────────
-  getShift: (ws) => request('GET', `/workspaces/${ws}/shift`),
+  getShift: (ws, personId) => request('GET', `/workspaces/${encodeURIComponent(ws)}/shift?personId=${encodeURIComponent(personId)}`),
+  getShiftHistory: (ws, personId) => request('GET', `/workspaces/${encodeURIComponent(ws)}/shift-sessions?personId=${encodeURIComponent(personId)}`),
   toggleShift: (ws, personId) => request('PUT', `/workspaces/${ws}/shift`, { personId }),
 
   // ── Handovers ─────────────────────────────────────────────────────

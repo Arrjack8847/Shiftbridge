@@ -30,6 +30,8 @@ import {
 let data = {
   workspaces: [],
   messages: [],
+  attachments: [],
+  people: demoPeople,
   tasks: [],
   issues: [],
   agentFeedback: [],
@@ -39,6 +41,7 @@ let data = {
   aiStatus: null,
   groqStatus: null,
   shifts: {},
+  shiftHistory: {},
   handovers: {},
 };
 let currentWorkspace = 'daily';
@@ -57,11 +60,12 @@ let flagMsgId = null;       // message being flagged as issue
 let pendingAnnouncementDraft = null; // AI-suggested draft for compose dialog
 let pendingAnnouncementId = null; // announcement being edited
 let lastRoute = '';
+let pendingPhoto = null;
 
 const app = document.querySelector('#app');
 const $ = (s) => document.querySelector(s);
 const workspace = () => data.workspaces.find((w) => w.id === currentWorkspace) || data.workspaces[0] || { id: '', name: '', type: '', members: [], rules: [], invite: '' };
-const member = (id) => demoPeople.find((p) => p.id === id) || { name: id || 'Unassigned', initials: '?', hue: 'blue', role: 'Employee' };
+const member = (id) => (data.people || demoPeople).find((p) => p.id === id) || { name: id || 'Unassigned', initials: '?', hue: 'blue', role: 'Employee' };
 const wsItems = (arr) => arr.filter((x) => x.ws === currentWorkspace);
 const route = () => decodeURIComponent(location.hash.replace(/^#\/?/, '').split('?')[0] || 'chat');
 const admin = () => identity?.role === 'admin';
@@ -105,12 +109,26 @@ function chatScreen() {
     const acked = (a.acknowledgments || []).some((ack) => ack.personId === identity?.userId);
     return `<button class="pinned-notice ${a.type === 'safety' ? 'safety' : ''}" data-nav="announcement/${encodeURIComponent(a.id)}"><span class="pin-icon">${icon('pin', 14)}</span><div class="grow"><strong>${e(a.title)}</strong><small>${a.type === 'safety' ? 'Safety notice' : 'Notice'} · ${acked ? 'Acknowledged' : 'Tap to acknowledge'}</small></div>${icon('chevron', 15)}</button>`;
   }).join('')}</div>` : '';
-  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header>${pinnedHtml}<div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected. Long-press or tap the dots to flag a message as an issue.</div><div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId; return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p><div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div><button class="msg-dots-btn" data-action="flag-message" data-id="${e(m.id)}" aria-label="Flag this message">${icon('dots', 16)}</button></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team" required/><button type="submit" class="send-button" aria-label="Send message">${icon('send', 18)}</button></form><input id="fileInput" type="file" accept="image/*" hidden/></div></div>`;
+  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header>${pinnedHtml}<div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected. Long-press or tap the dots to flag a message as an issue.</div><div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId;
+    const photos = data.attachments.filter((photo) => photo.messageId === m.id);
+    return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p>${photos.map((photo) => `<a href="${e(api.attachmentSrc(currentWorkspace, photo.id))}" target="_blank" rel="noopener noreferrer" aria-label="View attached photo"><img class="chat-photo" loading="lazy" src="${e(api.attachmentSrc(currentWorkspace, photo.id))}" alt="${e(photo.originalName)}" /></a>`).join('')}<div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div><button class="msg-dots-btn" data-action="flag-message" data-id="${e(m.id)}" aria-label="Flag this message">${icon('dots', 16)}</button></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team"/><button type="submit" class="send-button" aria-label="Send message">${icon('send', 18)}</button></form>${pendingPhoto ? `<div class="photo-selected">${icon('paperclip', 14)} Photo selected: ${e(pendingPhoto.name)} <button type="button" class="icon-btn" data-action="clear-photo" aria-label="Remove photo">${icon('x', 14)}</button></div>` : ''}<input id="fileInput" type="file" accept="image/jpeg,image/png,image/webp" hidden/></div></div>`;
 }
 
 function shiftScreen() {
   const s = data.shifts[currentWorkspace] || { on: false, since: null };
   return `<section class="surface-page">${pageHeading('My Shift', 'Your attendance and shift handover')}<div class="stack"><div class="card"><div class="row"> <span class="avatar big sea">${icon('clock', 25)}</span><div class="grow"><strong>${s.on ? 'You are on shift' : 'Not clocked in'}</strong><p class="small muted" style="margin:6px 0 0">${s.on ? `Since ${displayTime(s.since)}` : 'Tap below to start your shift'}</p></div>${badge(s.on ? 'ON SHIFT' : 'OFF SHIFT', s.on ? '' : 'gray')}</div><button style="margin-top:19px" class="btn full ${s.on ? 'outline' : ''}" data-action="clock-toggle">${icon('clock', 18)} ${s.on ? 'Clock out' : 'Clock in'}</button><p class="field-help">Attendance records are stored in the shared backend.</p></div><div class="card"><div class="card-title">Today's schedule</div><div class="row muted small">${icon('calendar')} 8:00 AM – 4:00 PM · Example shift</div><div class="row muted small" style="margin-top:12px">${icon('coffee')} ${e(workspace()?.name || '')}</div></div><div class="card inline-list"><button class="list-row" data-nav="handover">${icon('file')}<span class="grow"><strong>Shift handover</strong><p>Share important updates with the next shift.</p></span>${icon('chevron', 17)}</button><button class="list-row" data-action="attendance-history">${icon('clock')}<span class="grow"><strong>Clock-in / out history</strong><p>View your demo activity.</p></span>${icon('chevron', 17)}</button></div></div></section>`;
+}
+
+function attendanceHistoryScreen() {
+  const sessions = data.shiftHistory[currentWorkspace] || [];
+  return `<section class="surface-page"><button class="section-back" data-nav="shift">${icon('back', 17)} My Shift</button>
+  ${pageHeading('Attendance History', 'Your recent clock-in and clock-out sessions')}
+  <div class="card inline-list">${sessions.length ? sessions.map((s) => `<div class="list-row">
+    <span class="avatar sea">${icon('clock', 19)}</span><span class="grow"><strong>${e(new Date(s.clockInAt).toLocaleDateString('en-MY', { day: 'numeric', month: 'short', year: 'numeric' }))}</strong>
+    <p>${e(displayTime(s.clockInAt))} – ${s.clockOutAt ? e(displayTime(s.clockOutAt)) : 'Still on shift'}</p></span>
+    ${badge(s.clockOutAt ? 'Complete' : 'Active', s.clockOutAt ? 'gray' : '')}
+    </div>`).join('') : '<p class="muted">No attendance sessions recorded yet.</p>'}</div>
+  <p class="footer-note">Showing the last 100 sessions for your demo identity in this workspace.</p></section>`;
 }
 
 function handoverScreen() {
@@ -262,7 +280,7 @@ function notFound() {
 // ── Identity selector screen (NEW — shown before the app) ────────
 
 function identityScreen() {
-  return `<div class="identity-screen"><div class="identity-card"><img src="./assets/mark.svg" alt="ShiftBridge" class="identity-logo"/><h1>Shift<span>Bridge</span></h1><p>Choose a demo identity for this device</p><div class="identity-list">${demoPeople.map((p) => `<button class="identity-option" data-action="select-identity" data-id="${e(p.id)}"><span class="avatar ${p.hue} big">${e(p.initials)}</span><span class="grow"><strong>${e(p.name)}</strong><small>${e(p.role)}</small></span>${icon('chevron', 17)}</button>`).join('')}</div><div class="identity-warning"><span>${icon('shield', 16)} This is a simulated demo identity for the DORMATHON hackathon. It is <strong>not secure authentication</strong>. Do not use this backend on the public internet.</span></div></div></div>`;
+  return `<div class="identity-screen"><div class="identity-card"><img src="./assets/mark.svg" alt="ShiftBridge" class="identity-logo"/><h1>Shift<span>Bridge</span></h1><p>Choose a demo identity for this device</p><div class="identity-list">${(data.people || demoPeople).map((p) => `<button class="identity-option" data-action="select-identity" data-id="${e(p.id)}"><span class="avatar ${p.hue} big">${e(p.initials)}</span><span class="grow"><strong>${e(p.name)}</strong><small>${e(p.role)}</small></span>${icon('chevron', 17)}</button>`).join('')}</div><div class="identity-warning"><span>${icon('shield', 16)} This is a simulated demo identity for the DORMATHON hackathon. It is <strong>not secure authentication</strong>. Do not use this backend on the public internet.</span></div></div></div>`;
 }
 
 // ── Loading screen ────────────────────────────────────────────────
@@ -329,6 +347,7 @@ function render() {
     else if (path === 'tasks') view = taskScreen();
     else if (path.startsWith('task/')) view = taskDetail(path.split('/')[1]);
     else if (path === 'shift') view = shiftScreen();
+    else if (path === 'attendance') view = attendanceHistoryScreen();
     else if (path === 'handover') view = handoverScreen();
     else if (path === 'profile') view = profileScreen();
     else     if (path === 'manage') view = manageHome();
@@ -397,6 +416,7 @@ app.addEventListener('click', async (event) => {
   if (action === 'close-workspace-menu') { openWorkspaces = false; render(); return; }
   if (action === 'switch-workspace') {
     if (data.workspaces.some((w) => w.id === id)) {
+      pendingPhoto = null;
       currentWorkspace = id;
       openWorkspaces = false;
       nav('chat');
@@ -659,8 +679,18 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
-  if (action === 'attendance-history') { notify('Clock-in/out history is available via the backend API.'); return; }
+  if (action === 'attendance-history') { nav('attendance'); return; }
   if (action === 'attach') { document.querySelector('#fileInput')?.click(); return; }
+  if (action === 'clear-photo') { pendingPhoto = null; render(); return; }
+  if (action === 'clock-toggle') {
+    try {
+      data.shifts[currentWorkspace] = await api.toggleShift(currentWorkspace, identity.userId);
+      await refreshShifts();
+      render();
+      notify(data.shifts[currentWorkspace].on ? 'Clocked in' : 'Clocked out');
+    } catch (error) { notify('Attendance update failed: ' + error.message); }
+    return;
+  }
 });
 
 // ── Form submissions ──────────────────────────────────────────────
@@ -672,7 +702,8 @@ app.addEventListener('submit', async (event) => {
 
   // ── Send message ─────────────────────────────────────────────────
   if (form.id === 'send-message') {
-    const body = String(fields.message || '').trim();
+    const photo = pendingPhoto;
+    const body = String(fields.message || '').trim() || (photo ? '[Photo]' : '');
     if (!body) return;
     const msgId = safeID('m');
     const msg = { id: msgId, ws: currentWorkspace, user: identity.userId, body: body.slice(0, 1500), at: Date.now() };
@@ -682,6 +713,18 @@ app.addEventListener('submit', async (event) => {
     document.querySelector('#send-message input[name="message"]')?.focus();
     try {
       await api.sendMessage(currentWorkspace, { id: msgId, user: identity.userId, body: body.slice(0, 1500) });
+      if (photo) {
+        pendingPhoto = null;
+        try {
+          await api.uploadMessageAttachment(currentWorkspace, msgId, photo, identity.userId);
+          await refreshMessages();
+          render();
+          notify('Photo uploaded successfully');
+        } catch (uploadError) {
+          notify('Message sent, but photo failed: ' + uploadError.message);
+          render();
+        }
+      }
     } catch (err) {
       notify('Message failed to send: ' + err.message);
       // Remove optimistic message on failure.
@@ -879,11 +922,16 @@ app.addEventListener('submit', async (event) => {
 
 // ── File input change ─────────────────────────────────────────────
 app.addEventListener('change', (event) => {
-  if (event.target.id === 'fileInput') {
-    const f = event.target.files?.[0];
-    if (f) notify('Photo uploads require backend file storage. No file was sent.');
-    event.target.value = '';
+  if (event.target.id !== 'fileInput') return;
+  const photo = event.target.files?.[0];
+  event.target.value = '';
+  if (!photo) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(photo.type) || photo.size > 1300000) {
+    notify('Please choose a JPEG, PNG or WebP photo no larger than 1.3 MB');
+    return;
   }
+  pendingPhoto = photo;
+  render();
 });
 
 // ── Data loading & sync ────────────────────────────────────────────
@@ -893,6 +941,10 @@ let sseCleanup = null;
 
 async function loadAllData() {
   try {
+    try {
+      const people = await api.getPeople();
+      if (Array.isArray(people) && people.length) data.people = people;
+    } catch { /* offline identity selection still has five demo users */ }
     await refreshWorkspaces();
     await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
@@ -918,8 +970,11 @@ async function refreshWorkspaces() {
 }
 
 async function refreshMessages() {
-  const res = await api.getMessages(currentWorkspace);
+  const [res, attachments] = await Promise.all([
+    api.getMessages(currentWorkspace), api.getAttachments(currentWorkspace),
+  ]);
   data.messages = res.messages || data.messages;
+  data.attachments = attachments.attachments || [];
   if (res.revision) serverRevision = res.revision;
 }
 
@@ -982,9 +1037,13 @@ async function refreshAnnouncements() {
 
 async function refreshShifts() {
   try {
-    const res = await api.getShift(currentWorkspace);
-    data.shifts[currentWorkspace] = res;
-  } catch { /* ignore */ }
+    const [shift, history] = await Promise.all([
+      api.getShift(currentWorkspace, identity.userId),
+      api.getShiftHistory(currentWorkspace, identity.userId),
+    ]);
+    data.shifts[currentWorkspace] = shift;
+    data.shiftHistory[currentWorkspace] = history.sessions || [];
+  } catch (error) { console.error('Could not refresh attendance:', error); }
 }
 
 async function refreshHandovers() {
@@ -1052,7 +1111,11 @@ async function boot() {
   identity = getIdentity();
 
   if (!identity) {
-    // Show identity selector immediately.
+    // Backed by sb_people; cached list remains available while offline.
+    try {
+      const people = await api.getPeople();
+      if (Array.isArray(people) && people.length) data.people = people;
+    } catch { /* demo fallback */ }
     render();
     return;
   }

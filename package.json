@@ -8,20 +8,21 @@
     "dev": "node --env-file-if-exists=.env server/index.js",
     "start": "node --env-file-if-exists=.env server/index.js",
     "mcp": "node --env-file-if-exists=.env server/mcp-server.js",
-    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js && node --check server/test.js && node --check server/test-phase4.js && node --check server/test-phase5.js && node --check server/test-phase5.1.js && node --check server/test-tencent.js && node --check server/mcp-server.js && node --check server/tencent-agent.js && node --check server/message-intent.js && node --check server/test-message-intent.js && node --check server/incident-memory.js && node --check server/test-agent-v2.js && node --check server/groq-agent.js && node --check server/test-groq.js && node --check server/supabase-check.js && node --check server/supabase-sync.js && node --check server/supabase-runtime.js && node --check api/proxy.js && node --check server/test-vercel-proxy.js",
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js && node --check server/test.js && node --check server/test-phase4.js && node --check server/test-phase5.js && node --check server/test-phase5.1.js && node --check server/test-tencent.js && node --check server/mcp-server.js && node --check server/tencent-agent.js && node --check server/message-intent.js && node --check server/test-message-intent.js && node --check server/incident-memory.js && node --check server/test-agent-v2.js && node --check server/groq-agent.js && node --check server/test-groq.js && node --check server/supabase-check.js && node --check server/supabase-sync.js && node --check server/supabase-runtime.js && node --check api/proxy.js && node --check server/test-vercel-proxy.js && node --check server/photo-storage.js && node --check server/test-attendance.js",
     "test:backend": "node server/test.js",
     "test:phase4": "node server/test-phase4.js",
     "test:phase5": "node server/test-phase5.js",
     "test:phase5.1": "node server/test-phase5.1.js",
     "test:tencent": "node --test server/test-tencent.js",
-    "test": "node server/test.js && node server/test-phase4.js && node server/test-phase5.js && node server/test-phase5.1.js && npm run test:tencent && npm run test:messages && npm run test:agent-v2 && npm run test:groq && npm run test:vercel-proxy",
+    "test": "node server/test.js && node server/test-phase4.js && node server/test-phase5.js && node server/test-phase5.1.js && npm run test:tencent && npm run test:messages && npm run test:agent-v2 && npm run test:groq && npm run test:vercel-proxy && npm run test:attendance",
     "seed": "node server/seed.js",
     "test:messages": "node --test server/test-message-intent.js",
     "test:agent-v2": "node --test server/test-agent-v2.js",
     "test:groq": "node --test server/test-groq.js",
     "supabase:check": "node --env-file-if-exists=.env server/supabase-check.js",
     "supabase:sync": "node --env-file-if-exists=.env server/supabase-sync.js",
-    "test:vercel-proxy": "node --test server/test-vercel-proxy.js"
+    "test:vercel-proxy": "node --test server/test-vercel-proxy.js",
+    "test:attendance": "node --test server/test-attendance.js"
   },
   "engines": {
     "node": ">=18"
