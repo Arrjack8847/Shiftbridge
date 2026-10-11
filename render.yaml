@@ -1,0 +1,31 @@
+# ShiftBridge preview deployment — single Node/Express web service.
+# Free Render filesystems are ephemeral: this app currently stores LIVE data
+# in SQLite. Do not use this configuration for durable or sensitive data.
+services:
+  - type: web
+    name: shiftbridge-demo
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      # Pin Node.js to avoid breaking changes from Render's default runtime.
+      - key: NODE_VERSION
+        value: 22.22.0
+      - key: NODE_ENV
+        value: production
+      # server/index.js listens on PORT. The existing Groq agent internally
+      # calls http://localhost:3000/api unless SHIFTBRIDGE_API is overridden.
+      - key: PORT
+        value: "3000"
+      - key: AI_PROVIDER
+        value: groq
+      - key: GROQ_ENABLED
+        value: "1"
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      # Fill in at Render Blueprint creation; never commit API credentials.
+      - key: GROQ_API_KEY
+        sync: false
