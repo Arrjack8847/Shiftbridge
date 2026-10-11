@@ -594,17 +594,20 @@ async function create_manager_task(args) {
       createdBy: 'ai-agent',
     });
 
-    const summary = result.duplicate
-      ? `Task already exists for this message. No duplicate created.\n  Task: "${result.task?.name}" — assigned to ${result.task?.assignee}\n  Source message: ${messageId}`
-      : `Manager task created successfully — no approval needed.\n  Task: "${result.task?.name}" (ID: ${result.task?.id})\n  Assigned to: ${result.task?.assignee}\n  Category: ${result.task?.category}\n  Due: ${result.task?.due}\n  Source message: ${messageId}\n  The task is immediately visible to the assignee.`;
+    // The REST endpoint returns a flattened task, not { task: {...} }.
+    const task = result.task || result;
+    const duplicate = Boolean(result.duplicate);
+    const summary = duplicate
+      ? `Task already exists for this message. No duplicate created.\n  Task: "${task.name}" — assigned to ${task.assignee}\n  Source message: ${messageId}`
+      : `Manager task created successfully — no approval needed.\n  Task: "${task.name}" (ID: ${task.id})\n  Assigned to: ${task.assignee}\n  Category: ${task.category}\n  Due: ${task.due}\n  Source message: ${messageId}\n  The task is immediately visible to the assignee.`;
 
     return {
-      message: result.duplicate
+      message: duplicate
         ? 'Task already exists for this source message. No duplicate created.'
         : 'Manager task created successfully. The task is immediately visible to the assignee — no review cycle.',
       summary,
-      task: result.task,
-      duplicate: result.duplicate || false,
+      task,
+      duplicate,
       sourceMessage: result.sourceMessage,
     };
   } catch (err) {
