@@ -308,21 +308,43 @@ function recordAutoWarning(workspaceId, messageId, senderId, body, intent) {
     .get(workspaceId, messageId);
   if (existing) return existing.id;
 
+  const entityKey = normalizeEntityKey(body);
+  const matched = findMatchingOpenIssue(d, workspaceId, entityKey);
+  if (matched) {
+    const linked = linkMessageToIssue(d, {
+      workspaceId, issueId: matched.id, messageId,
+      relation: 'report', actor: 'fast-warning', reason: 'Exact equipment identifier matched',
+    });
+    if (!linked.ok) throw new Error(linked.error);
+    if (intent.issueType === 'safety') {
+      d.prepare("UPDATE issues SET severity='high',requires_approval=1,issue_type='safety' WHERE id=? AND workspace_id=?")
+        .run(matched.id, workspaceId);
+    }
+    bumpRevision();
+    notifySSE(workspaceId, {type:'issue',action:'linked',id:matched.id,messageId});
+    return matched.id;
+  }
+
   const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const title = `Possible ${intent.issueType} issue: ${body.replace(/\s+/g, ' ').slice(0, 130)}`;
   const ts = Date.now();
   const result = d.prepare(
     `INSERT OR IGNORE INTO issues
       (id, workspace_id, title, description, severity, status, source, created_by,
-       reporter_id, requires_approval, approved, evidence, issue_type, created_at)
-     VALUES (?, ?, ?, ?, ?, 'reported', ?, 'auto-warning-detector', ?, ?, 0, ?, ?, ?)`
+       reporter_id, requires_approval, approved, evidence, issue_type, created_at, entity_key, last_activity_at)
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, 'auto-warning-detector', ?, ?, 0, ?, ?, ?, ?, ?)`
   ).run(issueId, workspaceId, title.slice(0, 200), body, intent.severity,
     messageId, senderId, intent.issueType === 'safety' ? 1 : 0,
     'Unverified report from chat message; human inspection/confirmation required.',
-    intent.issueType, ts);
+    intent.issueType, ts, entityKey, ts);
 
   if (!result.changes) return d.prepare('SELECT id FROM issues WHERE workspace_id = ? AND source = ?')
     .get(workspaceId, messageId)?.id || null;
+  const originalLink = linkMessageToIssue(d, {
+    workspaceId, issueId, messageId, relation: 'report', actor: 'fast-warning',
+    reason: 'Original source for unverified warning',
+  });
+  if (!originalLink.ok) throw new Error(originalLink.error);
 
   d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(`al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
