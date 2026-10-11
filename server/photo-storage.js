@@ -55,7 +55,9 @@ export async function uploadPhoto(path, bytes, type) {
 }
 
 export async function readPhoto(path) {
-  const response = await fetch(objectUrl(path), {
+  // Private Storage downloads require the authenticated object endpoint.
+  const url = objectUrl(path).replace('/storage/v1/object/', '/storage/v1/object/authenticated/');
+  const response = await fetch(url, {
     method: 'GET', headers: headers(), signal: AbortSignal.timeout(20000),
   });
   if (!response.ok) throw new Error('Private photo retrieval failed (' + response.status + ')');
