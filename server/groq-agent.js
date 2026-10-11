@@ -151,7 +151,7 @@ const GROQ_ISSUE_TYPES = new Set(['equipment','inventory','safety','general']);
 const GROQ_ACTION_TYPES = new Set(['create_task','propose_task','completion_claim','report_issue','link_issue','no_action']);
 
 function protectedRequest(text) {
-  return /\\b(?:repair|fix|replace|maintenance|technician|qualified|inspection|inspect|safety|unsafe|hazard|sparking|electric(?:al)?|gas\\s+leak|fire|purchase|buy|spend|payment|refund|pay\\s+for)\\b/i.test(String(text||''));
+  return /\b(?:repair|fix|replace|maintenance|technician|qualified|inspection|inspect|safety|unsafe|hazard|sparking|electric(?:al)?|gas\s+leak|fire|purchase|buy|spend|payment|refund|pay\s+for)\b/i.test(String(text||''));
 }
 function safeText(value,limit=100) { return String(value||'').trim().slice(0,limit); }
 
@@ -179,7 +179,7 @@ async function executeAction(workspaceId, action, source) {
           protectedRequest(name + ' ' + description);
         const fields = {
           name,description,assignee,category:sensitive && !GROQ_PROTECTED_CATEGORIES.has(category)
-            ? (/\\b(?:purchase|buy|spend|payment|refund)\\b/i.test(source.body)?'purchases':'repairs')
+            ? (/\b(?:purchase|buy|spend|payment|refund)\b/i.test(source.body)?'purchases':'repairs')
             : category,
           due:safeText(action.due||'Today',50),
           priority:['low','normal','high'].includes(action.priority)?action.priority:'normal',
