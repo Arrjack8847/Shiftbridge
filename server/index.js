@@ -900,6 +900,20 @@ app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, 
     });
   }
 
+  // Validate that the claimed reporter really authored the source chat message.
+  // Otherwise one employee's message can be used to complete someone else's task.
+  if (msgRow.user_id !== reportingEmployee) {
+    return res.status(403).json({
+      error: 'Reporting employee must match the source message sender',
+      messageId,
+      messageSender: msgRow.user_id,
+      reportingEmployee,
+    });
+  }
+  if (!['completion', 'progress', 'ambiguous'].includes(claimType)) {
+    return res.status(400).json({ error: 'Invalid claimType' });
+  }
+
   // ── 3. Check reporting employee matches task assignee ───────────
   if (taskRow.assignee !== reportingEmployee) {
     // Record the rejected claim attempt for audit purposes.
@@ -944,9 +958,9 @@ app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, 
   const ts = Date.now();
   const claimId = `cc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
-  // For progress-only messages, the task status does NOT change.
-  // The claim is recorded for audit purposes but the task remains as-is.
-  if (claimType === 'progress') {
+  // Progress-only and ambiguous messages must never be interpreted as
+  // completed work. Record them as evidence without altering the task.
+  if (claimType === 'progress' || claimType === 'ambiguous') {
     const tx2 = d.transaction(() => {
       d.prepare(
         `INSERT OR IGNORE INTO completion_claims (id, workspace_id, task_id, message_id, reporting_employee, claim_text, claim_type, status, verification_applied, created_at)
@@ -955,7 +969,7 @@ app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, 
 
       d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
         `al_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, ws, 'chat_progress_report', 'task', taskId, 'silent-ai',
-        `Progress report from chat: ${reportingEmployee} reported "${claimText.slice(0, 100)}" (msg ${messageId}). Task status unchanged.`, ts,
+        `Non-completion chat report from chat: ${reportingEmployee} reported "${claimText.slice(0, 100)}" (msg ${messageId}). Task status unchanged.`, ts,
       );
       bumpRevision();
     });
@@ -966,7 +980,7 @@ app.post('/api/workspaces/:workspace/chat-completion', validateWorkspace, (req, 
     const task2 = d.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId);
     const claim2 = d.prepare('SELECT * FROM completion_claims WHERE id = ?').get(claimId);
     return res.status(201).json({
-      message: 'Progress report recorded — task status unchanged',
+      message: 'Progress or ambiguous claim recorded — task status unchanged',
       claim: mapCompletionClaim(claim2),
       task: mapTask(task2),
       verificationApplied: 'none',
