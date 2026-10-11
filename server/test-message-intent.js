@@ -97,3 +97,12 @@ test('personal expressions of distress are not operational incident reports', ()
   assert.notEqual(classify("I'm broken").route, 'issue');
   assert.notEqual(classify('We are broken').route, 'issue');
 });
+
+test('negated safety incidents are not automatically escalated', () => {
+  for (const body of [
+    'There is no smoke',
+    'The machine is not sparking',
+    'No gas smell today',
+    'Machine 2 is no longer leaking',
+  ]) assert.notEqual(classify(body).route, 'issue', body);
+});
