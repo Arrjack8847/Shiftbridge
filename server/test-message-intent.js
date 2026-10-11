@@ -56,3 +56,36 @@ test('combined warnings and instructions still receive AI task review', () => {
   assert.equal(r.route, 'issue');
   assert.equal(r.needsAi, true);
 });
+
+
+test('explicit routine manager-style tasks can avoid CodeBuddy on validated backend', () => {
+  const result = classify('Emma, please restock the paper cups before 5 PM.');
+  assert.equal(result.route, 'routine-task');
+  assert.deepEqual(result.task, {
+    assignee: 'emma',
+    name: 'Restock the paper cups',
+    due: 'Before 5 PM',
+    category: 'inventory',
+    priority: 'normal',
+  });
+  assert.equal(classify('Jack please clean the tables').task.category, 'cleaning');
+});
+
+test('never fast-path repairs, spending, conditionals or multi-part task plans', () => {
+  for (const body of [
+    'Emma please repair the printer',
+    'Emma please purchase new cups',
+    'Emma clean the machine if the lights are on',
+    'Emma please clean the tables and repair the oven',
+    'Emma clean the electrical panel',
+  ]) assert.notEqual(classify(body).route, 'routine-task', body);
+});
+
+test('common informal fault phrases are recognized', () => {
+  for (const body of [
+    "The printer isn't working",
+    'The aircon is spoilt',
+    'Machine rosak',
+  ]) assert.equal(classify(body).route, 'issue', body);
+});
+
