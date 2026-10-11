@@ -21,6 +21,12 @@ The Windows CLI script is resolved from `%APPDATA%\npm\node_modules\
 `CODEBUDDY_CLI_SCRIPT`. If needed, set `CODEBUDDY_NODE_BIN` to the Node.js
 executable. These are **paths**, not passwords.
 
+For isolated tests, set both `SHIFTBRIDGE_API` and
+`CODEBUDDY_CLI_MCP_TARGET` to `http://127.0.0.1:3001/api`. The child
+receives a dedicated `CODEBUDDY_MCP_CONFIG` pointing to the MCP script
+in this test checkout and that exact local backend. The two URLs must match.
+Write-enabled CLI calls refuse to start unless the explicit target is set.
+
 The adapter strips WorkBuddy Desktop-specific CLI environment overrides from
 the child process without changing global environment variables. If an inherited
 HTTP proxy triggers startup failures, use `CODEBUDDY_CLI_CLEAR_PROXY=true`
@@ -82,7 +88,7 @@ the internal API to the Internet.
 
 ## Testing
 
-Run `npm run test:tencent` for isolated parser/retry unit tests.
+Run `npm run test:tencent` for isolated parser/retry/config-validation unit tests.
 They **do not access port 3000 or modify SQLite**. Their passing status is
 not an end-to-end Tencent AI claim.
 
