@@ -13,6 +13,7 @@
 import express from 'express';
 import cors from 'cors';
 import { classifyIncomingMessage } from './message-intent.js';
+import { normalizeEntityKey, findMatchingOpenIssue, linkMessageToIssue, issueMessages, workspaceIncidentContext } from './incident-memory.js';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
@@ -272,13 +273,16 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   const sinceSeq = req.query.sinceSeq ? parseInt(req.query.sinceSeq, 10) : 0;
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
 
-  // Fetch limit+1 rows to determine hasMore without a second query.
-  const rows = d.prepare(
-    'SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? AND seq > ? ORDER BY seq ASC LIMIT ?',
-  ).all(req.workspaceId, since, sinceSeq, limit + 1);
-
+  // latest=1 returns the newest batch in chronological order.
+  // Existing since/sinceSeq pagination remains backward compatible.
+  const latest = req.query.latest === '1' && !since && !sinceSeq;
+  const rows = latest
+    ? d.prepare('SELECT * FROM messages WHERE workspace_id = ? ORDER BY seq DESC LIMIT ?').all(req.workspaceId, limit + 1)
+    : d.prepare('SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? AND seq > ? ORDER BY seq ASC LIMIT ?').all(req.workspaceId, since, sinceSeq, limit + 1);
   const hasMore = rows.length > limit;
-  const messages = (hasMore ? rows.slice(0, limit) : rows).map(mapMessage);
+  const selected = rows.slice(0, limit);
+  if (latest) selected.reverse();
+  const messages = selected.map(mapMessage);
   const nextSinceSeq = hasMore && messages.length > 0
     ? messages[messages.length - 1].seq
     : null;
@@ -568,7 +572,7 @@ app.put('/api/tasks/:id', (req, res) => {
 app.get('/api/workspaces/:workspace/issues', validateWorkspace, (req, res) => {
   const d = getDB();
   const rows = d.prepare('SELECT * FROM issues WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
-  res.json({ issues: rows.map(mapIssue), revision: currentRevision() });
+  res.json({ issues: rows.map(row => ({...mapIssue(row), linkedMessages: issueMessages(d, req.workspaceId, row.id, 12)})), revision: currentRevision() });
 });
 
 /** GET /api/issues/:id — get a single issue. */
@@ -576,7 +580,7 @@ app.get('/api/issues/:id', (req, res) => {
   const d = getDB();
   const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'issue not found' });
-  res.json(mapIssue(row));
+  res.json({...mapIssue(row), linkedMessages: issueMessages(d, row.workspace_id, row.id, 30)});
 });
 
 /** PUT /api/issues/:id — update an issue (status, evidence, approved). */
