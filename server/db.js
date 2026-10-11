@@ -7,6 +7,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { normalizeEntityKey } from './incident-memory.js';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
@@ -394,6 +395,14 @@ export function initSchema() {
     const cols = d.prepare('PRAGMA table_info(issues)').all().map(c => c.name);
     if (!cols.includes('entity_key')) d.exec('ALTER TABLE issues ADD COLUMN entity_key TEXT');
     if (!cols.includes('last_activity_at')) d.exec('ALTER TABLE issues ADD COLUMN last_activity_at INTEGER');
+  }
+  // Upgrade existing demo databases without resetting reports. Only infer
+  // explicit equipment identifiers; leave ambiguous historic issues unkeyed.
+  const legacy = d.prepare('SELECT id,title,description FROM issues WHERE entity_key IS NULL').all();
+  const backfillKey = d.prepare('UPDATE issues SET entity_key=? WHERE id=? AND entity_key IS NULL');
+  for (const issue of legacy) {
+    const key = normalizeEntityKey((issue.title || '') + ' ' + (issue.description || ''));
+    if (key) backfillKey.run(key, issue.id);
   }
   d.exec(`
     CREATE INDEX IF NOT EXISTS idx_issues_entity_active
