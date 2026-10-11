@@ -218,7 +218,11 @@ function issueScreen(id) {
     (recentLinkedMessages.length ? recentLinkedMessages.map(m =>
       '<div class="soft-panel" style="margin-bottom:8px">' +
       '<small>' + e(member(m.user).name) + ' · ' + displayTime(m.at) + ' · ' + e(m.relation || 'report') + '</small>' +
-      '<p class="readable">' + e(m.body) + '</p></div>').join('') :
+      '<p class="readable">' + e(m.body) + '</p>' +
+      (admin() && m.id !== i.source ? '<div class="row" style="flex-wrap:wrap;gap:6px">' +
+        '<button class="btn outline" data-action="feedback-link-correct" data-id="' + e(i.id) + '" data-message-id="' + e(m.id) + '">Correct link</button>' +
+        '<button class="btn outline" data-action="feedback-link-wrong" data-id="' + e(i.id) + '" data-message-id="' + e(m.id) + '">Wrong link</button></div>' : '') +
+      '</div>').join('') :
       '<p class="muted">No linked messages yet.</p>') + '</div>';
   const lastFeedback = (data.agentFeedback || []).find(f => f.issueId === i.id);
   const feedbackCard = admin() && i.source
@@ -526,15 +530,20 @@ app.addEventListener('click', async (event) => {
   }
 
   // ── Agent V2: manager evaluates a detected incident ───────────────
-  if (action === 'feedback-correct' || action === 'feedback-false') {
+  if (['feedback-correct','feedback-false','feedback-link-correct','feedback-link-wrong'].includes(action)) {
     if (!admin()) return notify('Only the manager can review AI detections.');
     const issue = data.issues.find(item => item.id === id && item.ws === currentWorkspace);
-    if (!issue?.source) return notify('Issue has no verified source message.');
+    const messageId = action.startsWith('feedback-link-') ? el.dataset.messageId : issue?.source;
+    if (!messageId) return notify('Issue has no verified source message.');
+    const verdict = action === 'feedback-correct' ? 'correct_issue'
+      : action === 'feedback-false' ? 'false_alarm'
+      : action === 'feedback-link-correct' ? 'correct_link' : 'wrong_link';
     try {
       await api.submitAgentFeedback(currentWorkspace, {
-        reviewerId:identity.userId,issueId:id,messageId:issue.source,
-        verdict:action === 'feedback-correct' ? 'correct_issue' : 'false_alarm',
-        note:'Manager reviewed the original reported issue',
+        reviewerId:identity.userId,issueId:id,messageId,
+        verdict,
+        note:action.startsWith('feedback-link-') ? 'Manager reviewed incident-message link'
+          : 'Manager reviewed the original reported issue',
       });
       await refreshAgentFeedback();
       render();
