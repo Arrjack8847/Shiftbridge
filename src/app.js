@@ -189,7 +189,7 @@ function proposalCard(p) {
   const confidenceLabel = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence' };
   const reviewed = p.status !== 'pending';
   const isProtected = p.type === 'completion_review' && (p.evidence || []).some((ev) => ev.toLowerCase().includes('qualified review') || ev.toLowerCase().includes('safety note'));
-  return `<div class="proposal-card ${reviewed ? 'reviewed' : ''}"><div class="proposal-header"><span class="badge ${typeBadge[p.type] || ''}">${e(typeLabels[p.type] || p.type)}</span>${isProtected ? '<span class="badge red">PROTECTED</span>' : ''}${badge(confidenceLabel[p.confidence] || p.confidence, p.confidence === 'high' ? '' : 'amber')}${reviewed ? badge(p.status.toUpperCase(), p.status === 'approved' ? '' : 'red') : ''}</div><p class="proposal-summary">${e(p.summary)}</p>${p.evidence && p.evidence.length ? `<div class="proposal-evidence"><div class="eyebrow">EVIDENCE</div><ul>${p.evidence.map((item) => `<li>${e(item)}</li>`).join('')}</ul></div>` : ''}${p.reasoning ? `<div class="proposal-reasoning"><div class="eyebrow">AI REASONING</div><p>${e(p.reasoning)}</p></div>` : ''}${!reviewed ? `<div class="proposal-actions"><button class="btn" data-action="approve-proposal" data-id="${e(p.id)}">${icon('check', 16)} Approve</button><button class="btn outline" data-action="reject-proposal" data-id="${e(p.id)}">Reject</button></div>` : `<div class="proposal-reviewed-note"><small>Reviewed by ${e(p.reviewedBy || 'manager')} · ${p.reviewedAt ? displayTime(p.reviewedAt) : ''}</small></div>`}</div>`;
+  return `<div class="proposal-card ${reviewed ? 'reviewed' : ''}"><div class="proposal-header"><span class="badge ${typeBadge[p.type] || ''}">${e(typeLabels[p.type] || p.type)}</span>${isProtected ? '<span class="badge red">PROTECTED</span>' : ''}${badge(confidenceLabel[p.confidence] || p.confidence, p.confidence === 'high' ? '' : 'amber')}${reviewed ? badge(p.status.toUpperCase(), p.status === 'approved' ? '' : 'red') : ''}</div><p class="proposal-summary">${e(p.summary)}</p>${p.evidence && p.evidence.length ? `<div class="proposal-evidence"><div class="eyebrow">EVIDENCE</div><ul>${p.evidence.map((item) => `<li>${e(item)}</li>`).join('')}</ul></div>` : ''}${p.reasoning ? `<div class="proposal-reasoning"><div class="eyebrow">AI REASONING</div><p>${e(p.reasoning)}</p></div>` : ''}${!reviewed ? `<div class="proposal-actions"><button class="btn" data-action="approve-proposal" data-id="${e(p.id)}">${icon('check', 16)} Approve</button><button class="btn outline" data-action="reject-proposal" data-id="${e(p.id)}">Disapprove</button></div>` : `<div class="proposal-reviewed-note"><small>Reviewed by ${e(p.reviewedBy || 'manager')} · ${p.reviewedAt ? displayTime(p.reviewedAt) : ''}</small></div>`}</div>`;
 }
 
 function manageHome() {
@@ -584,7 +584,7 @@ app.addEventListener('click', async (event) => {
   if (action === 'task-filter') { currentTaskFilter = id; render(); return; }
   if (action === 'all-filter') { allWorkFilter = id; render(); return; }
   if (action === 'create-task') { activeDialog = 'task'; render(); return; }
-  if (action === 'close-dialog') { activeDialog = ''; render(); return; }
+  if (action === 'close-dialog') { activeDialog = ''; pendingAttention = null; render(); return; }
   if (action === 'reset-demo') { activeDialog = 'reset'; render(); return; }
 
   if (action === 'confirm-reset') {
@@ -599,7 +599,7 @@ app.addEventListener('click', async (event) => {
   }
 
   // ── Task status updates (API calls) ─────────────────────────────
-  if (action === 'task-start' || action === 'task-complete' || action === 'task-verify' || action === 'task-blocked' || action === 'task-reopen') {
+  if (action === 'task-start' || action === 'task-complete' || action === 'task-blocked' || action === 'task-reopen') {
     const t = data.tasks.find((x) => x.id === id && x.ws === currentWorkspace);
     if (!t) return;
     if (!admin() && t.assignee !== identity?.userId) return notify('You can only update your own tasks.');
@@ -611,11 +611,6 @@ app.addEventListener('click', async (event) => {
     if (action === 'task-complete') {
       newStatus = t.verification === 'qualified' ? 'review' : 'done';
       newCompletion = t.verification === 'qualified' ? 'Awaiting qualified review' : 'Self-reported done';
-    }
-    if (action === 'task-verify') {
-      if (!admin()) return;
-      newStatus = 'done';
-      newCompletion = 'Verified by demo administrator';
     }
     if (action === 'task-blocked') {
       newStatus = 'blocked';
@@ -737,20 +732,16 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
-  // ── Approve inspection ───────────────────────────────────────────
-  if (action === 'approve-inspection') {
-    const i = data.issues.find((x) => x.id === id && x.ws === currentWorkspace);
-    if (i) {
-      i.approved = true;
-      render();
-      try {
-        await api.updateIssue(id, { approved: true, actor: identity.userId });
-        notify('Inspection request approved in this demo — no real booking made.');
-      } catch (err) {
-        notify('Update failed: ' + err.message);
-        await refreshIssues();
-      }
-    }
+  // ── Manager decision ─────────────────────────────────────────────
+  if (action === 'attention-decision') {
+    if (!admin()) return notify('Only managers can approve or disapprove.');
+    const type = el.dataset.type, decision = el.dataset.decision;
+    const item = type === 'issue' ? data.issues.find(i => i.id === id && i.ws === currentWorkspace)
+      : data.tasks.find(t => t.id === id && t.ws === currentWorkspace);
+    if (!item || !['approve','disapprove'].includes(decision)) return;
+    pendingAttention = { type, id, decision };
+    activeDialog = 'attention-review';
+    render();
     return;
   }
 
@@ -1004,10 +995,9 @@ app.addEventListener('submit', async (event) => {
     activeDialog = '';
     try {
       await api.resolveIssue(pendingIssueId, {
-        verifier: identity.userId,
-        evidence: evidence.slice(0, 1000),
-        notes: text.slice(0, 1000),
-        actor: identity.userId,
+        qualifiedVerifier: identity.userId,
+        verificationEvidence: (text + (evidence ? '\nEvidence: ' + evidence : '')).slice(0, 2000),
+        resolvedBy: identity.userId,
       });
       await refreshIssues();
       notify('Resolution recorded with qualified verification — not independently certified');
@@ -1118,7 +1108,7 @@ async function loadAllData() {
       if (Array.isArray(people) && people.length) data.people = people;
     } catch { /* offline identity selection still has five demo users */ }
     await refreshWorkspaces();
-    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAttentionDecisions(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
   } catch (err) {
     connectionStatus = 'offline';
@@ -1154,6 +1144,12 @@ async function refreshTasks() {
   const res = await api.getTasks(currentWorkspace);
   data.tasks = res.tasks || data.tasks;
   if (res.revision) serverRevision = res.revision;
+}
+
+async function refreshAttentionDecisions() {
+  if (!admin()) { data.attentionDecisions = []; return; }
+  const response = await api.getAttentionDecisions(currentWorkspace);
+  data.attentionDecisions = response.decisions || [];
 }
 
 async function refreshIssues() {
@@ -1227,7 +1223,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAttentionDecisions(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -1239,7 +1235,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAttentionDecisions(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
     }
