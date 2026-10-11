@@ -78,6 +78,9 @@ test('never fast-path repairs, spending, conditionals or multi-part task plans',
     'Emma clean the machine if the lights are on',
     'Emma please clean the tables and repair the oven',
     'Emma clean the electrical panel',
+    'Emma count the cash register',
+    'Jack clean the oven',
+    'Sarah prepare the bank payment',
   ]) assert.notEqual(classify(body).route, 'routine-task', body);
 });
 
@@ -89,3 +92,8 @@ test('common informal fault phrases are recognized', () => {
   ]) assert.equal(classify(body).route, 'issue', body);
 });
 
+
+test('personal expressions of distress are not operational incident reports', () => {
+  assert.notEqual(classify("I'm broken").route, 'issue');
+  assert.notEqual(classify('We are broken').route, 'issue');
+});
