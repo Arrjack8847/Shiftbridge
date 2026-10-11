@@ -33,3 +33,12 @@ To run locally, add the same values to gitignored `.env`, then `npm run dev`.
 - Cloud sync is a snapshot mechanism, not a guaranteed durable queue. For genuine production use, migrate operations and protected-work verification to native Postgres transactions, implement real authentication/authorization and a durable job queue.
 - Existing snapshot utility `npm run supabase:sync` is an explicit one-time manual copy; the opt-in runtime adapter is separate.
 - Table additions for Agent V2: `sb_issue_message_links`, `sb_ai_feedback`, plus issue entity fields.
+
+## Vercel ↔ Render routing
+
+- Render Express backend is at `https://shiftbridge-yua0.onrender.com`.
+- The Vercel static frontend does not serve `/api/*`. `vercel.json` rewrites `/api/:path*` to the Render API on custom domains.
+- For `*.vercel.app` deployments, `src/api.js` accesses Render directly (including SSE/EventSource) because Vercel itself cannot process Express requests.
+- Backend must be running, or requests will fail. If Render logs `Supabase mode requires SUPABASE_URL and a server-only SUPABASE_SECRET_KEY`, configure the server-side secret first. An `sb_publishable_` key is not a replacement.
+- **The current Vercel project must actually deploy this repository's latest `main`** for the config and API change to appear. The connected Vercel account did not expose a ShiftBridge project during the audit; verify the correct Vercel account/team and import/link this repository if necessary.
+- Smoke test on new Vercel build: open the chat, send a test message, verify task updates, and confirm API health at `https://shiftbridge-yua0.onrender.com/api/health`.
