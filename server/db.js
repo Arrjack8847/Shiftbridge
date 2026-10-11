@@ -50,6 +50,15 @@ export function initSchema() {
       created_at    INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS people (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      initials   TEXT NOT NULL,
+      hue        TEXT NOT NULL,
+      role       TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS workspace_members (
       workspace_id  TEXT NOT NULL,
       person_id     TEXT NOT NULL,
