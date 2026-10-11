@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import proxy from '../api/proxy.js';
@@ -64,4 +65,21 @@ test('upstream connection failures show 502 backend unavailable',async()=>{
  const res=await proxy.fetch(req('health'));
  assert.equal(res.status,502);
  assert.equal((await res.json()).code,'BACKEND_UNAVAILABLE');
+});
+
+
+test('Vercel configuration routes nested API requests through the proxy',()=>{
+ const config=JSON.parse(readFileSync(new URL('../vercel.json',import.meta.url),'utf8'));
+ assert.deepEqual(config.rewrites.find(r=>r.source==='/api/:path*'),{
+  source:'/api/:path*',
+  destination:'/api/proxy?__sb_route=:path*'
+ });
+});
+
+test('HTML 404 from Render is returned as actionable JSON 502',async()=>{
+ process.env.SHIFTBRIDGE_RENDER_URL='https://example.onrender.com';
+ globalThis.fetch=async()=>new Response('<html>Not Found</html>',{status:404,headers:{'content-type':'text/html'}});
+ const res=await proxy.fetch(req('workspaces/daily/messages'));
+ assert.equal(res.status,502);
+ assert.equal((await res.json()).code,'BACKEND_ROUTE_NOT_FOUND');
 });
