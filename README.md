@@ -30,9 +30,15 @@ The server starts on `0.0.0.0:3000`. The console will print:
 
 Open `http://localhost:3000` on your laptop, and `http://<laptop-ip>:3000` on phones connected to the same Wi-Fi.
 
+## Agent V2 now uses Groq API by default
+
+**The default AI provider is `groq`, not Tencent CodeBuddy.** The existing AI features—contextual incident linking, warnings, hybrid completion claims, manager feedback and human verification—remain available. CodeBuddy is only a legacy opt-in fallback.
+
+Setup: [docs/groq-agent-v2.md](docs/groq-agent-v2.md). Create a local `.env` from [`.env.example`](.env.example), insert your **private** Groq key, then run `npm run test:groq` and `npm run dev`. Never commit your API key.
+
 ## Agent V2 — contextual incident memory (development branch)
 
-Agent V2 links source-backed chat messages to existing unresolved incidents, gives Tencent recent incident history and manager-labeled examples, and shows a reviewable incident conversation in the admin dashboard. It does **not** fine-tune Tencent weights, prove faults are real, or automatically clear protected work.
+Agent V2 links source-backed chat messages to unresolved incidents, gives Groq recent incident history and manager-reviewed examples, and shows a reviewable incident conversation in the admin dashboard. It does **not** fine-tune Tencent weights, prove faults are real, or automatically clear protected work.
 
 **Documentation and Windows test commands:** [docs/agent-v2.md](docs/agent-v2.md).
 
@@ -43,7 +49,7 @@ npm run test:agent-v2
 
 ## Fast task and warning routing (Tencent test branch)
 
-When `AI_PROVIDER=tencent-local`:
+For both providers (Groq is the default; Tencent is legacy opt-in):
 - Clear operational reports such as "The printer is broken", "Machine 2 is leaking", "The POS is offline", or "Gas leak in the kitchen" are written immediately as **unverified, reported issues**. The source chat message, real author, timestamp and audit trail are preserved; safety reports receive high severity and still require a human check. No AI action authorizes repair or certifies safety.
 - Simple, explicit, low-risk **manager** assignments such as "Emma, please restock the cups before 5 PM" use the already-validated `/manager-task` endpoint without starting the AI process. The endpoint enforces manager role, assignee membership and category rules. Complex work, repairs, spending and safety instructions still go to Tencent.
 - Greetings/acknowledgments skip Tencent entirely.
