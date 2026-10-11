@@ -689,7 +689,9 @@ app.put('/api/issues/:id', (req, res) => {
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no updatable fields' });
 
   const ts = Date.now();
-  if (updates.status === 'resolved') updates.resolved_at = ts;
+  if (updates.status === 'resolved') {
+    return res.status(403).json({error:'Issue resolution requires qualified-verifier route'});
+  }
 
   const setClauses = Object.keys(updates).map((k) => `${k} = @${k}`).join(', ');
   updates.id = id;
@@ -1928,14 +1930,35 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
     });
   }
 
+  // Merge explicitly identified equipment reports with the same unresolved
+  // incident. Do NOT infer links from words like "it" or generic "machine".
+  const entityKey = normalizeEntityKey(msg.body);
+  const matched = findMatchingOpenIssue(d, req.workspaceId, entityKey);
+  if (matched) {
+    const link = linkMessageToIssue(d, {
+      workspaceId:req.workspaceId, issueId:matched.id, messageId, relation:'report',
+      actor:detectedByAi ? 'silent-ai' : reporterId,
+      reason:'Existing active incident with exact matching equipment identifier',
+    });
+    if (!link.ok) return res.status(link.status).json({error:link.error});
+    if (issueType === 'safety') {
+      d.prepare("UPDATE issues SET severity='high',requires_approval=1,issue_type='safety' WHERE id=? AND workspace_id=?")
+        .run(matched.id,req.workspaceId);
+    }
+    bumpRevision();
+    notifySSE(req.workspaceId,{type:'issue',action:'linked',id:matched.id,messageId});
+    const row = d.prepare('SELECT * FROM issues WHERE id=?').get(matched.id);
+    return res.status(200).json({...mapIssue(row),linked:true,duplicate:false});
+  }
+
   // Create the issue.
   const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = Date.now();
   const issueTitle = title.trim() || `Reported issue from ${msg.user_id}'s message`;
 
   d.prepare(
-    `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at)
-     VALUES (?, ?, ?, ?, ?, 'reported', ?, ?, ?, ?, 0, ?, ?, ?)`,
+    `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at, entity_key, last_activity_at)
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
   ).run(issueId, req.workspaceId, issueTitle.slice(0, 200),
     msg.body, detectedByAi && issueType === 'safety' ? 'high' : 'normal',
     messageId, detectedByAi ? 'silent-ai' : reporterId, reporterId,
@@ -1943,7 +1966,13 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
     detectedByAi
       ? `Unverified AI-detected claim in message ${messageId}; requires human confirmation.`
       : `Source message: "${msg.body.slice(0, 200)}"`,
-    issueType, ts);
+    issueType, ts, entityKey, ts);
+
+  const link = linkMessageToIssue(d, {
+    workspaceId:req.workspaceId,issueId,messageId,relation:'report',
+    actor:detectedByAi ? 'silent-ai' : reporterId,reason:'Original source message for incident',
+  });
+  if (!link.ok) throw new Error(link.error);
 
   // Audit entry.
   d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
@@ -2300,6 +2329,9 @@ app.post('/api/reset', (_req, res) => {
     DELETE FROM announcement_acknowledgments;
     DELETE FROM announcement_revisions;
     DELETE FROM announcements;
+    DELETE FROM ai_feedback;
+    DELETE FROM issue_message_links;
+    DELETE FROM ai_jobs;
     DELETE FROM ai_analysis_log;
     DELETE FROM completion_claims;
     DELETE FROM ai_proposals;
