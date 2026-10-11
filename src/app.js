@@ -37,6 +37,7 @@ let data = {
   completionClaims: [],
   announcements: [],
   aiStatus: null,
+  groqStatus: null,
   shifts: {},
   handovers: {},
 };
@@ -138,12 +139,21 @@ function manageHome() {
   const pendingProposals = wsItems(data.proposals).filter((p) => p.status === 'pending');
   const activeAnnouncements = wsItems(data.announcements).filter((a) => a.status === 'published' && !a.archivedAt);
   const ai = data.aiStatus;
+  const groq = data.groqStatus;
   const aiLatest = ai?.latest;
   const aiAgg = ai?.aggregates;
   const aiStalled = ai?.stalled;
   const aiLastRun = aiLatest?.runAt ? displayTime(aiLatest.runAt) : 'Never';
   const aiCard = ai ? `<div class="card ai-monitor-card"><div class="row between"><div class="eyebrow">${icon('spark', 16)} SILENT AI MONITORING</div>${aiStalled ? badge('STALLED', 'red') : aiLatest ? badge('ACTIVE', '') : badge('NOT RUN', 'gray')}</div><div class="metric-grid" style="margin-top:12px"><div class="metric"><small>Last analysis</small><b style="font-size:13px">${e(aiLastRun)}</b></div><div class="metric"><small>Messages analyzed</small><b>${aiAgg?.totalMessagesAnalyzed || 0}</b></div><div class="metric"><small>Proposals created</small><b>${aiAgg?.totalProposalsCreated || 0}</b></div><div class="metric"><small>Completion claims</small><b>${aiAgg?.totalCompletionClaims || 0}</b></div></div>${aiLatest?.errors ? `<div class="alert-panel" style="margin-top:10px;padding:8px 12px;font-size:13px">${icon('alert', 14)} ${e(aiLatest.errors.slice(0, 150))}</div>` : ''}${aiLatest?.summary ? `<p class="small muted" style="margin-top:8px">${e(aiLatest.summary.slice(0, 200))}</p>` : ''}<p class="small muted" style="margin-top:8px">Scheduled hourly. The AI reads messages, proposes tasks, and processes completion claims — never posts to chat.</p></div>` : '';
-  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status !== 'resolved').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div><div class="metric"><small>Active announcements</small><b>${activeAnnouncements.length}</b>${badge(activeAnnouncements.length ? 'Published' : 'None', activeAnnouncements.length ? '' : 'gray')}</div></div>${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
+  const groqCard = '<div class="card ai-monitor-card">' +
+    '<div class="row between"><strong>Groq AI Agent V2</strong>' +
+    (groq?.enabled ? badge('CONNECTED') : badge('API KEY NEEDED','amber')) + '</div>' +
+    '<p class="muted small">Model: ' + e(groq?.model || 'not configured') +
+    ' · Completed: ' + (groq?.completed || 0) +
+    ' · Pending: ' + (groq?.pending || 0) +
+    ' · Failed: ' + (groq?.failed || 0) + '</p>' +
+    '<p class="small muted">Runs silently after ambiguous chat messages. Simple warnings and routine assignments use the fast route.</p></div>';
+  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status !== 'resolved').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div><div class="metric"><small>Active announcements</small><b>${activeAnnouncements.length}</b>${badge(activeAnnouncements.length ? 'Published' : 'None', activeAnnouncements.length ? '' : 'gray')}</div></div>${groqCard}${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
 }
 
 function attentionScreen() {
@@ -956,6 +966,11 @@ async function refreshAIStatus() {
     const res = await api.getAIStatus(currentWorkspace);
     data.aiStatus = res;
   } catch { /* ai-status endpoint may not exist yet */ }
+  try {
+    data.groqStatus = await api.getGroqStatus(currentWorkspace);
+  } catch {
+    data.groqStatus = null;
+  }
 }
 
 async function refreshAnnouncements() {
