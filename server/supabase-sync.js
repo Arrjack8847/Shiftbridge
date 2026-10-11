@@ -21,12 +21,13 @@ const tables = [
  'workspaces','workspace_members','messages','tasks','issues','rules',
  'audit_log','shifts','handovers','meta','ai_proposals','completion_claims',
  'ai_analysis_log','announcements','announcement_revisions',
- 'announcement_acknowledgments','ai_jobs'
+ 'announcement_acknowledgments','ai_jobs','issue_message_links','ai_feedback'
 ];
 const conflict = {
  workspace_members:'workspace_id,person_id',
  shifts:'workspace_id',handovers:'workspace_id',meta:'key',
  announcement_acknowledgments:'announcement_id,person_id',
+ issue_message_links:'workspace_id,message_id',
 };
 
 async function upsert(table, rows) {
