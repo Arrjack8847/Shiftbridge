@@ -123,12 +123,41 @@ test('Groq default processes manager tasks and contextual incident updates witho
     assert.ok(latest.linkedMessages.some(m=>m.id===follow),'Groq did not link follow-up to existing issue');
     assert.equal((await api('GET','/api/workspaces/daily/issues')).body.issues.filter(i=>i.id===incident.id).length,1);
 
+    // The model cannot relabel a protected repair as a routine task.
+    replies.push({actions:[{
+      type:'create_task',name:'Repair the broken printer',assignee:'emma',
+      category:'routine',priority:'high',description:'Repair the malfunctioning printer',
+      reasoning:'Manager requested repair',
+    }],analysis:'Protected repair requires review'});
+    const protectedMsg=await send('manager','Emma, please repair the broken printer before closing.');
+    await awaitJob(protectedMsg);
+    const repairTask=(await api('GET','/api/workspaces/daily/tasks')).body.tasks
+      .find(t=>t.source===protectedMsg);
+    assert.ok(!repairTask,'Groq must not silently create protected repair tasks');
+    const proposals=(await api('GET','/api/workspaces/daily/proposals')).body.proposals;
+    assert.ok(proposals.some(p=>p.sourceMessageId===protectedMsg),
+      'Protected manager request should create a proposal for review');
+
+    // An employee cannot turn a model-generated create_task into a direct assignment.
+    replies.push({actions:[{
+      type:'create_task',name:'Count new snack shelf items',
+      assignee:'sarah',category:'inventory',priority:'normal',
+      reasoning:'Employee suggested stock work',
+    }],analysis:'Employee cannot directly assign tasks'});
+    const employeeMsg=await send('emma','Sarah, could you count the snack shelf items tomorrow?');
+    await awaitJob(employeeMsg);
+    const after=(await api('GET','/api/workspaces/daily/tasks')).body.tasks;
+    assert.ok(!after.some(t=>t.source===employeeMsg),'Employee message cannot silently create task');
+    const afterProps=(await api('GET','/api/workspaces/daily/proposals')).body.proposals;
+    assert.ok(afterProps.some(p=>p.sourceMessageId===employeeMsg),
+      'Employee suggestion should require manager review');
+
     // Fast path must bypass the LLM for certain claims.
     const callCount=requests.length;
     await send('emma','The printer is broken.');
     await delay(100);
     assert.equal(requests.length,callCount,'Fast warning should not pay for a new Groq model call');
-    assert.equal(requests.length,3,'Unexpected Groq calls');
+    assert.equal(requests.length,5,'Unexpected Groq calls');
     assert.equal(requests[0].response_format.type,'json_object');
     assert.ok(requests[2].messages[1].content.includes(incident.id),'Model was not given Agent V2 incident memory');
   } finally {
