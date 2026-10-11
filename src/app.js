@@ -972,7 +972,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -984,7 +984,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
       render();
