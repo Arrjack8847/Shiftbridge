@@ -79,3 +79,8 @@
 .photo-selected{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:12px;color:var(--ink);overflow-wrap:anywhere}
 .photo-selected .icon-btn{margin-left:auto;flex-shrink:0}
 @media(max-width:600px){.chat-photo{max-width:100%;max-height:200px}.photo-selected{padding:5px 8px}}
+
+/* Keep the chat field tappable above the raised mobile Chat navigation button. */
+.chat-offline{background:#fff2e7;color:#875321;border-bottom:1px solid #f3d6b5;padding:10px 18px;font-size:12px;line-height:1.5}
+.chat-offline a{font-weight:700;text-decoration:underline}
+@media(max-width:700px){.composer-wrap{position:relative;z-index:11}}
