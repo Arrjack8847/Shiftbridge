@@ -129,6 +129,20 @@ test('Agent V2: recent messages, incident memory, feedback, isolation and safety
     assert.ok(context.body.feedbackExamples.some(example =>
       example.messageId===first && example.verdict==='correct_issue'),
       'Manager labels should be available to future Tencent context prompts');
+    const disputed = await api('POST','/api/workspaces/daily/agent-feedback',{
+      issueId:issue.id,messageId:followUp,reviewerId:'manager',verdict:'wrong_link',
+      note:'This follow-up referred to a different machine',
+    });
+    assert.equal(disputed.status,201,JSON.stringify(disputed.body));
+    const afterDispute = await api('GET','/api/workspaces/daily/incident-context');
+    const correctedIncident = afterDispute.body.incidents.find(i=>i.id===issue.id);
+    assert.ok(correctedIncident);
+    assert.ok(!correctedIncident.messages.some(m=>m.id===followUp),
+      'Manager-disputed links must not be returned as incident context evidence');
+    assert.equal((await api('POST',linkUrl,{
+      messageId:followUp,relation:'update',
+      reason:'Attempting to relink a manager-disputed message',
+    })).status,409);
     const otherContext = await api('GET','/api/workspaces/riverside/incident-context');
     assert.ok(!otherContext.body.incidents.some(i=>i.id===issue.id));
   } finally {
