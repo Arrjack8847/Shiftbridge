@@ -126,6 +126,9 @@ test('Agent V2: recent messages, incident memory, feedback, isolation and safety
 
     const context = await api('GET','/api/workspaces/daily/incident-context');
     assert.ok(context.body.incidents.some(i=>i.id===issue.id && i.messages.length>0));
+    assert.ok(context.body.feedbackExamples.some(example =>
+      example.messageId===first && example.verdict==='correct_issue'),
+      'Manager labels should be available to future Tencent context prompts');
     const otherContext = await api('GET','/api/workspaces/riverside/incident-context');
     assert.ok(!otherContext.body.incidents.some(i=>i.id===issue.id));
   } finally {
