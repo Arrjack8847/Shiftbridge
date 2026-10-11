@@ -69,6 +69,8 @@ const api = {
   getAgentFeedback: (ws, reviewerId) => request('GET', `/workspaces/${ws}/agent-feedback?reviewerId=${encodeURIComponent(reviewerId)}`),
   submitAgentFeedback: (ws, body) => request('POST', `/workspaces/${ws}/agent-feedback`, body),
   updateIssue: (id, data) => request('PUT', `/issues/${id}`, data),
+  getAttentionDecisions: (ws) => request('GET', `/workspaces/${encodeURIComponent(ws)}/attention-decisions`),
+  reviewAttention: (type, id, body) => request('POST', `/attention/${encodeURIComponent(type)}/${encodeURIComponent(id)}/review`, body),
 
   // ── Rules ─────────────────────────────────────────────────────────
   updateRule: (id, allowed) => request('PUT', `/rules/${id}`, { allowed }),
