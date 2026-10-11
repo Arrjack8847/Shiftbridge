@@ -64,7 +64,7 @@ export function classifyIncomingMessage(body) {
 
   // A question may be an information request, not a report of an active fault.
   // Never create a warning for a conditional, negated, or resolved statement.
-  if (/^(?:i(?:'m| am)|we(?:'re| are)|you(?:'re| are))\\s+(?:so\\s+)?broken\\b/i.test(text)) {
+  if (/^(?:i(?:'m| am)|we(?:'re| are)|you(?:'re| are))\s+(?:so\s+)?broken\b/i.test(text)) {
     return { route: 'ai', reason: 'personal-metaphor' };
   }
   if (HYPOTHETICAL.test(text) || RESOLVED.test(text) || NEGATED.test(text) ||
