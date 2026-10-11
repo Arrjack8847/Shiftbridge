@@ -8,14 +8,16 @@
     "dev": "node --env-file-if-exists=.env server/index.js",
     "start": "node --env-file-if-exists=.env server/index.js",
     "mcp": "node --env-file-if-exists=.env server/mcp-server.js",
-    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js && node --check server/test.js && node --check server/test-phase4.js && node --check server/test-phase5.js && node --check server/test-phase5.1.js && node --check server/test-tencent.js && node --check server/mcp-server.js && node --check server/tencent-agent.js",
+    "check": "node --check src/app.js && node --check src/data.js && node --check src/icons.js && node --check src/api.js && node --check server/index.js && node --check server/db.js && node --check server/seed.js && node --check server/rule-defaults.js && node --check server/test.js && node --check server/test-phase4.js && node --check server/test-phase5.js && node --check server/test-phase5.1.js && node --check server/test-tencent.js && node --check server/mcp-server.js && node --check server/tencent-agent.js && node --check server/supabase-check.js && node --check server/supabase-sync.js",
     "test:backend": "node server/test.js",
     "test:phase4": "node server/test-phase4.js",
     "test:phase5": "node server/test-phase5.js",
     "test:phase5.1": "node server/test-phase5.1.js",
     "test:tencent": "node --test server/test-tencent.js",
     "test": "node server/test.js && node server/test-phase4.js && node server/test-phase5.js && node server/test-phase5.1.js && npm run test:tencent",
-    "seed": "node server/seed.js"
+    "seed": "node server/seed.js",
+    "supabase:check": "node --env-file-if-exists=.env server/supabase-check.js",
+    "supabase:sync": "node --env-file-if-exists=.env server/supabase-sync.js"
   },
   "engines": {
     "node": ">=18"
