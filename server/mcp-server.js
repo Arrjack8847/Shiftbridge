@@ -255,6 +255,26 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_incident_context',
+    description: 'Read the current workspace incident memory including unresolved incidents and source messages, for safe conversational references. Never infer a verified repair from text.',
+    inputSchema: {type:'object',properties:{workspace:{type:'string',description:'Workspace ID'}},required:['workspace']},
+  },
+  {
+    name: 'link_incident_message',
+    description: 'Link a REAL new workspace message to ONE already-existing unresolved incident, rather than creating a duplicate. Give evidence-grounded reasoning. This records a claim or scheduled action only; it cannot close or certify an incident.',
+    inputSchema: {
+      type:'object',
+      properties:{
+        workspace:{type:'string',description:'Workspace ID'},
+        issueId:{type:'string',description:'Exact existing issue ID from get_incident_context'},
+        messageId:{type:'string',description:'Real source message ID from the latest chat'},
+        relation:{type:'string',enum:['update','evidence','completion_claim','inspection_scheduled','report']},
+        reason:{type:'string',description:'Explain the exact textual link between this message and that incident (minimum 12 characters)'}
+      },
+      required:['workspace','issueId','messageId','relation','reason'],
+    },
+  },
+  {
     name: 'get_reported_issues',
     description: 'Get all issues that have been flagged by employees from chat messages in a workspace. Returns issue details including the reporter, linked announcement, issue type, and resolution status. Use this to review the current state of employee-reported problems and to identify issues that may warrant an announcement. This tool supports Workflow B (employee flagging) and Workflow C (announcement creation based on issues).',
     inputSchema: {
@@ -316,6 +336,7 @@ async function get_recent_messages(args) {
   const params = new URLSearchParams();
   if (sinceSeq) params.set('sinceSeq', sinceSeq);
   params.set('limit', String(limit));
+  if (!sinceSeq) params.set('latest', '1');
 
   const data = await apiRequest('GET', `/workspaces/${args.workspace}/messages?${params}`);
   const messages = data.messages || [];
@@ -673,6 +694,26 @@ async function report_chat_issue(args) {
   }
 }
 
+async function get_incident_context(args) {
+  if (!args.workspace) return {error:'workspace is required'};
+  return apiRequest('GET', '/workspaces/'+encodeURIComponent(args.workspace)+'/incident-context');
+}
+
+async function link_incident_message(args) {
+  const {workspace,issueId,messageId,relation='update',reason=''} = args;
+  if (!workspace || !issueId || !messageId || String(reason).trim().length < 12) {
+    return {error:'workspace, issueId, real messageId and contextual reason are required'};
+  }
+  try {
+    const result = await apiRequest('POST',
+      '/workspaces/'+encodeURIComponent(workspace)+'/incidents/'+encodeURIComponent(issueId)+'/link-message',
+      {messageId,relation,reason:String(reason).slice(0,500)});
+    return {message:result.duplicate?'Already linked; no duplicate created':'Unverified message linked to existing incident',...result};
+  } catch (err) {
+    return {error:err.message,workspace,issueId,messageId};
+  }
+}
+
 async function get_reported_issues(args) {
   const { workspace, status = 'open' } = args;
 
@@ -836,6 +877,8 @@ const TOOL_HANDLERS = {
   propose_chat_completion,
   create_manager_task,
   get_reported_issues,
+  get_incident_context,
+  link_incident_message,
   report_chat_issue,
   propose_announcement_draft,
 };
