@@ -5,7 +5,7 @@
  * Never use with two writers/instances; use Postgres-native transactions for production.
  */
 import { getDB, initSchema } from './db.js';
-const TABLES=['workspaces','workspace_members','messages','tasks','issues','rules',
+const TABLES=['people','workspaces','workspace_members','messages','tasks','issues','rules',
   'audit_log','shifts','handovers','meta','ai_proposals','completion_claims',
   'ai_analysis_log','announcements','announcement_revisions','announcement_acknowledgments',
   'ai_jobs','issue_message_links','ai_feedback'];
