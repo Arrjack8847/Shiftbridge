@@ -481,17 +481,19 @@ async function triggerCodeBuddyCLI(workspaceId, messageId, messageUser, messageB
         reject(new Error('CodeBuddy CLI output exceeded limit'));
         return;
       }
-      const result = parseStreamJsonOutput(stdout);
-      const realMcpCalls = validateAgentEvidence(result);
-      const latency = Date.now() - startTime;
-
-      resolve({
-        runId: `cli-${messageId}-${Date.now()}`,
-        completed: true,
-        latency,
-        output: result.text,
-        toolCalls: realMcpCalls,
-      });
+      try {
+        const result = parseStreamJsonOutput(stdout);
+        const realMcpCalls = validateAgentEvidence(result);
+        resolve({
+          runId: `cli-${messageId}-${Date.now()}`,
+          completed: true,
+          latency: Date.now() - startTime,
+          output: result.text,
+          toolCalls: realMcpCalls,
+        });
+      } catch (err) {
+        reject(err);
+      }
     });
 
     child.on('error', (err) => {
