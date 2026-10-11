@@ -271,6 +271,7 @@ async function triggerCodeBuddyServe(workspaceId, messageId, messageUser, messag
 export function parseStreamJsonOutput(stdout) {
   const toolCalls = [];
   const toolErrors = [];
+  const toolResults = [];
   let text = '';
   let finished = false;
   let successful = false;
@@ -302,6 +303,7 @@ export function parseStreamJsonOutput(stdout) {
             catch { return false; }
           });
         }
+        toolResults.push({ id: block.tool_use_id, ok: !error });
         if (error) toolErrors.push(block.tool_use_id || 'unknown-tool');
       }
     }
@@ -312,7 +314,7 @@ export function parseStreamJsonOutput(stdout) {
     }
     if (obj.type === 'error') toolErrors.push(obj.message || 'agent error');
   }
-  return { text, toolCalls, toolErrors, finished, successful };
+  return { text, toolCalls, toolResults, toolErrors, finished, successful };
 }
 
 export function validateAgentEvidence(result) {
@@ -326,6 +328,11 @@ export function validateAgentEvidence(result) {
   }
   if (result.toolErrors?.length) {
     throw new Error(`CodeBuddy MCP tool execution failed: ${result.toolErrors.join(', ')}`);
+  }
+  for (const call of realMcpCalls) {
+    if (!call.id || !result.toolResults?.some(item => item.id === call.id && item.ok)) {
+      throw new Error(`Missing successful tool_result evidence for ${call.name}`);
+    }
   }
   return realMcpCalls;
 }
