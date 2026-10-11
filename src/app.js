@@ -50,6 +50,10 @@ let connectionStatus = 'connecting'; // 'connecting' | 'online' | 'offline'
 let currentTaskFilter = 'todo';
 let allWorkFilter = 'all';
 let toast = '';
+// Unsent chat text survives refreshes, SSE updates, and view changes.
+const chatDrafts = new Map();
+let renderedChatWorkspace = null;
+let sendingMessage = false;
 let openWorkspaces = false;
 let activeDialog = '';
 let pendingIssueId = null;
@@ -105,7 +109,8 @@ function chatScreen() {
     const acked = (a.acknowledgments || []).some((ack) => ack.personId === identity?.userId);
     return `<button class="pinned-notice ${a.type === 'safety' ? 'safety' : ''}" data-nav="announcement/${encodeURIComponent(a.id)}"><span class="pin-icon">${icon('pin', 14)}</span><div class="grow"><strong>${e(a.title)}</strong><small>${a.type === 'safety' ? 'Safety notice' : 'Notice'} · ${acked ? 'Acknowledged' : 'Tap to acknowledge'}</small></div>${icon('chevron', 15)}</button>`;
   }).join('')}</div>` : '';
-  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header>${pinnedHtml}<div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected. Long-press or tap the dots to flag a message as an issue.</div><div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId; return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p><div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div><button class="msg-dots-btn" data-action="flag-message" data-id="${e(m.id)}" aria-label="Flag this message">${icon('dots', 16)}</button></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team" required/><button type="submit" class="send-button" aria-label="Send message">${icon('send', 18)}</button></form><input id="fileInput" type="file" accept="image/*" hidden/></div></div>`;
+  const offlineNotice = connectionStatus === 'offline' ? `<div class="chat-offline" role="status">Chat server unavailable. Messages cannot be delivered right now. <a href="/api/health" target="_blank" rel="noopener noreferrer">Check connection</a></div>` : '';
+  return `<div class="chat-shell"><header class="chat-head"><span class="avatar sea">${icon('users')}</span><div class="grow"><h1>${e(workspace()?.name || '')} · Team Chat</h1><small>One shared chat · ${workspace()?.members.length || 0} members</small></div>${badge('Work chat')}</header>${pinnedHtml}<div class="notice-chat">${icon('info', 13)} Work messages in this workspace may be analyzed for operational tasks when WorkBuddy AI is connected. Long-press or tap the dots to flag a message as an issue.</div>${offlineNotice}<div class="chat-chat" id="chatMessages" role="log" aria-live="polite"><span class="day-label">${e(formatDate(Date.now()))}</span>${messages.map((m) => { const p = member(m.user), mine = m.user === identity?.userId; return `<div class="message ${mine ? 'mine' : ''}" data-message="${e(m.id)}">${personAvatar(m.user)}<div class="message-body">${!mine ? `<strong>${e(p.name)}</strong>` : ''}<p>${e(m.body)}</p><div class="message-meta">${displayTime(m.at)}${mine ? icon('doublecheck', 12) : ''}</div><button class="msg-dots-btn" data-action="flag-message" data-id="${e(m.id)}" aria-label="Flag this message">${icon('dots', 16)}</button></div></div>`; }).join('')}</div><div class="composer-wrap"><form id="send-message" class="composer" autocomplete="off"><button type="button" class="icon-btn" style="border:0" data-action="attach" aria-label="Attach photo">${icon('paperclip', 18)}</button><input type="text" name="message" maxlength="1500" placeholder="Message your team..." aria-label="Message your team" value="${e(chatDrafts.get(currentWorkspace) || '')}" required/><button type="submit" class="send-button" aria-label="Send message" ${sendingMessage ? 'disabled' : ''}>${icon('send', 18)}</button></form><input id="fileInput" type="file" accept="image/*" hidden/></div></div>`;
 }
 
 function shiftScreen() {
@@ -321,6 +326,19 @@ function render() {
     return;
   }
 
+  // Snapshot before innerHTML replaces the chat DOM. Preserve mobile focus,
+  // caret and unsent text even during a background sync or notification.
+  const previousComposer = app.querySelector('#send-message input[name="message"]');
+  const previousWorkspace = renderedChatWorkspace;
+  const keepFocus = previousComposer && document.activeElement === previousComposer && previousWorkspace === currentWorkspace;
+  const caretStart = keepFocus ? previousComposer.selectionStart : null;
+  const caretEnd = keepFocus ? previousComposer.selectionEnd : null;
+  if (previousComposer && previousWorkspace) chatDrafts.set(previousWorkspace, previousComposer.value);
+  const previousLog = app.querySelector('#chatMessages');
+  const keepScroll = previousLog && previousWorkspace === currentWorkspace;
+  const wasAtBottom = !keepScroll || previousLog.scrollHeight - previousLog.scrollTop - previousLog.clientHeight < 80;
+  const oldScrollTop = keepScroll ? previousLog.scrollTop : 0;
+
   try {
     let path = route();
     if (!admin() && (path.startsWith('manage/') || path === 'manage' || path === 'workspace/rules' || path === 'workspace/invite')) path = 'chat';
@@ -349,7 +367,21 @@ function render() {
 
     app.innerHTML = `<div class="app-frame">${sideBar(path)}<div class="content-wrap">${desktopHead()}${mobileHeader(path)}<main class="app-main">${view}</main>${bottomNav(path)}</div></div>${workspaceMenu()}${popup()}${toast ? `<div class="notification" role="status">${e(toast)}</div>` : ''}`;
 
-    if (path === 'chat') { const logs = $('#chatMessages'); if (logs) logs.scrollTop = logs.scrollHeight; }
+    if (path === 'chat') {
+      const composer = app.querySelector('#send-message input[name="message"]');
+      if (composer) {
+        composer.value = chatDrafts.get(currentWorkspace) || '';
+        if (keepFocus) {
+          composer.focus({ preventScroll: true });
+          if (caretStart !== null && caretEnd !== null) composer.setSelectionRange(caretStart, caretEnd);
+        }
+      }
+      const logs = $('#chatMessages');
+      if (logs) logs.scrollTop = wasAtBottom ? logs.scrollHeight : oldScrollTop;
+      renderedChatWorkspace = currentWorkspace;
+    } else {
+      renderedChatWorkspace = null;
+    }
     if (lastRoute !== path) lastRoute = path;
   } catch (renderErr) {
     console.error('Render error:', renderErr);
@@ -663,6 +695,13 @@ app.addEventListener('click', async (event) => {
   if (action === 'attach') { document.querySelector('#fileInput')?.click(); return; }
 });
 
+// ── Keep each workspace's unsent chat draft in memory ───────────────
+app.addEventListener('input', (event) => {
+  if (event.target.matches?.('#send-message input[name="message"]')) {
+    chatDrafts.set(renderedChatWorkspace || currentWorkspace, event.target.value);
+  }
+});
+
 // ── Form submissions ──────────────────────────────────────────────
 
 app.addEventListener('submit', async (event) => {
@@ -673,21 +712,30 @@ app.addEventListener('submit', async (event) => {
   // ── Send message ─────────────────────────────────────────────────
   if (form.id === 'send-message') {
     const body = String(fields.message || '').trim();
-    if (!body) return;
+    if (!body || sendingMessage) return;
+    const sendWorkspace = currentWorkspace;
+    const sendUser = identity.userId;
     const msgId = safeID('m');
-    const msg = { id: msgId, ws: currentWorkspace, user: identity.userId, body: body.slice(0, 1500), at: Date.now() };
-    // Optimistic update.
-    data.messages.push(msg);
+    const msg = { id: msgId, ws: sendWorkspace, user: sendUser, body: body.slice(0, 1500), at: Date.now() };
+    sendingMessage = true;
+    chatDrafts.set(sendWorkspace, '');
+    form.querySelector('input[name="message"]').value = '';
+    data.messages.push(msg); // Optimistic update; backend is source of truth.
     render();
-    document.querySelector('#send-message input[name="message"]')?.focus();
+
+    let sendError = null;
     try {
-      await api.sendMessage(currentWorkspace, { id: msgId, user: identity.userId, body: body.slice(0, 1500) });
+      await api.sendMessage(sendWorkspace, { id: msgId, user: sendUser, body: msg.body });
     } catch (err) {
-      notify('Message failed to send: ' + err.message);
-      // Remove optimistic message on failure.
       data.messages = data.messages.filter((m) => m.id !== msgId);
+      // Do not overwrite new text entered while the send request was pending.
+      if (!chatDrafts.get(sendWorkspace)) chatDrafts.set(sendWorkspace, body);
+      sendError = 'Message not sent: ' + err.message + '. Your draft was restored.';
+    } finally {
+      sendingMessage = false;
       render();
     }
+    if (sendError) notify(sendError);
     return;
   }
 
@@ -1011,12 +1059,15 @@ async function fullSync() {
       await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
-      render();
     }
+    const reconnected = connectionStatus !== 'online';
     connectionStatus = 'online';
+    if (syncRes.changed || reconnected) render();
   } catch (err) {
+    const disconnected = connectionStatus !== 'offline';
     connectionStatus = 'offline';
     console.error('Sync failed:', err);
+    if (disconnected) render();
   }
 }
 
