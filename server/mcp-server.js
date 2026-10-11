@@ -723,10 +723,9 @@ async function get_reported_issues(args) {
     const data = await apiRequest('GET', `/workspaces/${workspace}/issues`);
     let issues = data.issues || [];
 
-    // Filter by status if not 'all'.
-    if (status !== 'all') {
-      issues = issues.filter((i) => i.status === status);
-    }
+    // "open" means unresolved, including fresh 'reported' warning claims.
+    if (status === 'open') issues = issues.filter(i => i.status !== 'resolved');
+    else if (status !== 'all') issues = issues.filter(i => i.status === status);
 
     // Separate employee-reported issues (have a reporterId) from AI-detected issues.
     const reported = issues.filter((i) => i.reporterId);
