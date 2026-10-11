@@ -1269,14 +1269,40 @@ app.get('/api/tencent/pending-jobs', (_req, res) => {
 
 /** POST /api/tencent/jobs/:jobId/complete — mark a job completed after MCP tool processing. */
 app.post('/api/tencent/jobs/:jobId/complete', (req, res) => {
+  // Manual WorkBuddy completion is a separate, explicitly opted-in route.
+  // Otherwise anyone on the demo LAN could fabricate successful AI actions.
+  const secret = process.env.SHIFTBRIDGE_MANUAL_AI_TOKEN;
+  if (!secret) {
+    return res.status(503).json({ error: 'Manual AI completion disabled; use the event-driven agent' });
+  }
+  if (req.get('Authorization') !== `Bearer ${secret}`) {
+    return res.status(401).json({ error: 'Authorized agent required' });
+  }
   const { jobId } = req.params;
   const { actions, analysis, model } = req.body;
+  if (!Array.isArray(actions)) {
+    return res.status(400).json({ error: 'actions must be an array' });
+  }
   const d = getDB();
   const ts = Date.now();
 
   const job = d.prepare('SELECT * FROM ai_jobs WHERE id = ?').get(jobId);
   if (!job) {
     return res.status(404).json({ error: 'Job not found' });
+  }
+  if (job.status === 'completed') {
+    return res.status(409).json({ error: 'Job already completed' });
+  }
+  // Do not accept an unverified claim that a manager task was created.
+  for (const action of actions) {
+    if (action.type === 'create_manager_task' && action.ok === true) {
+      const found = d.prepare(
+        'SELECT id FROM tasks WHERE workspace_id = ? AND source = ? LIMIT 1',
+      ).get(job.workspace_id, job.message_id);
+      if (!found) {
+        return res.status(409).json({ error: 'Claimed manager task has no matching persisted task' });
+      }
+    }
   }
 
   // Update job to completed
