@@ -1774,7 +1774,7 @@ app.post('/api/workspaces/:workspace/manager-task', validateWorkspace, (req, res
  */
 app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res) => {
   const d = getDB();
-  const { messageId, reporterId, title = '', issueType = 'general' } = req.body;
+  const { messageId, reporterId, title = '', issueType = 'general', detectedByAi = false } = req.body;
 
   if (!messageId) return res.status(400).json({ error: 'messageId is required' });
   if (!reporterId) return res.status(400).json({ error: 'reporterId is required' });
@@ -1786,6 +1786,15 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
   // Verify the reporter is a workspace member.
   if (!isWorkspaceMember(d, req.workspaceId, reporterId)) {
     return res.status(403).json({ error: 'Reporter is not a member of this workspace' });
+  }
+
+  // AI-reported incidents must be tied to the actual author of the message.
+  // This cannot prove the incident is true; it only verifies attribution.
+  if (detectedByAi && reporterId !== msg.user_id) {
+    return res.status(403).json({ error: 'AI report must attribute the source message to its actual author' });
+  }
+  if (detectedByAi && !['equipment', 'inventory', 'safety', 'general'].includes(issueType)) {
+    return res.status(400).json({ error: 'Invalid AI issue type' });
   }
 
   // Idempotency: check for existing issue with same (workspace, source).
@@ -1808,16 +1817,24 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
 
   d.prepare(
     `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at)
-     VALUES (?, ?, ?, ?, 'normal', 'reported', ?, ?, ?, 0, 0, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, ?, ?, ?, 0, ?, ?, ?)`,
   ).run(issueId, req.workspaceId, issueTitle.slice(0, 200),
-    msg.body, messageId, reporterId, reporterId,
-    `Source message: "${msg.body.slice(0, 200)}"`, issueType, ts);
+    msg.body, detectedByAi && issueType === 'safety' ? 'high' : 'normal',
+    messageId, detectedByAi ? 'silent-ai' : reporterId, reporterId,
+    detectedByAi && issueType === 'safety' ? 1 : 0,
+    detectedByAi
+      ? `Unverified AI-detected claim in message ${messageId}; requires human confirmation.`
+      : `Source message: "${msg.body.slice(0, 200)}"`,
+    issueType, ts);
 
   // Audit entry.
   d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
     `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
-    'issue_reported', 'issue', issueId, reporterId,
-    `Employee ${reporterId} flagged message ${messageId} as an issue: "${msg.body.slice(0, 150)}"`,
+    detectedByAi ? 'issue_ai_reported' : 'issue_reported', 'issue', issueId,
+    detectedByAi ? 'silent-ai' : reporterId,
+    detectedByAi
+      ? `AI identified possible problem in message ${messageId}; source author ${reporterId}; needs verification`
+      : `Employee ${reporterId} flagged message ${messageId} as an issue: "${msg.body.slice(0, 150)}"`,
     ts,
   );
 
