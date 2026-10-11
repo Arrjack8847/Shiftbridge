@@ -36,7 +36,8 @@ export function linkMessageToIssue(db, {workspaceId,issueId,messageId,relation='
   const issue = db.prepare('SELECT id,status FROM issues WHERE id = ? AND workspace_id = ?').get(issueId,workspaceId);
   const msg = db.prepare('SELECT id,user_id,body FROM messages WHERE id = ? AND workspace_id = ?').get(messageId,workspaceId);
   if (!issue || !msg) return {ok:false,status:404,error:'Issue or message not found in workspace'};
-  const existing = db.prepare('SELECT issue_id FROM issue_message_links WHERE workspace_id = ? AND message_id = ?').get(workspaceId,messageId);
+  const existing = db.prepare('SELECT issue_id,relation FROM issue_message_links WHERE workspace_id = ? AND message_id = ?').get(workspaceId,messageId);
+  if (existing?.relation === 'disputed') return {ok:false,status:409,error:'Manager disputed this message link; human review required'};
   if (existing) return existing.issue_id === issueId
     ? {ok:true,duplicate:true,issueId,messageId}
     : {ok:false,status:409,error:'Message already linked to a different incident'};
@@ -64,6 +65,6 @@ export function workspaceIncidentContext(db, workspaceId, limit=8) {
   return rows.map(i=>({
     id:i.id,title:i.title,status:i.status,type:i.issue_type,severity:i.severity,
     entityKey:i.entity_key,latestActivity:i.latest_activity,
-    messages:issueMessages(db,workspaceId,i.id,3)
+    messages:issueMessages(db,workspaceId,i.id,15).filter(m=>m.relation!=='disputed').slice(-3)
   }));
 }
