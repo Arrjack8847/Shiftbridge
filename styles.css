@@ -73,3 +73,8 @@
 .lifecycle-stage.done strong{color:var(--teal2)}
 .lifecycle-stage strong{display:block;font-size:12px;color:var(--muted)}
 .lifecycle-stage small{display:block;font-size:11px;color:var(--muted);margin-top:2px}
+
+/* Keep mobile chat input tappable above the raised Chat navigation button. */
+.chat-offline{background:#fff2e7;color:#875321;border-bottom:1px solid #f3d6b5;padding:10px 18px;font-size:12px;line-height:1.5}
+.chat-offline a{font-weight:700;text-decoration:underline}
+@media(max-width:700px){.composer-wrap{position:relative;z-index:11}}
