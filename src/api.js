@@ -21,7 +21,13 @@ async function request(method, path, body = null) {
   const text = await res.text();
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text }; }
-  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    // A Vercel NOT_FOUND page is HTML rather than our backend's JSON.
+    if (res.status === 404 && !(res.headers.get('content-type') || '').includes('json')) {
+      throw new Error('API route returned 404. Check Vercel proxy deployment and Render backend URL');
+    }
+    throw new Error(typeof json.error === 'string' ? json.error : `HTTP ${res.status}`);
+  }
   return json;
 }
 
