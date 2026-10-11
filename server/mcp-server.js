@@ -809,8 +809,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   try {
     const result = await handler(args || {});
+    // Handlers return {error: ...} for expected policy or validation failures.
+    // They must still be signalled as MCP errors, not successful tool calls.
+    const failed = Boolean(result && typeof result === 'object' && result.error);
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      isError: failed,
     };
   } catch (err) {
     return {
