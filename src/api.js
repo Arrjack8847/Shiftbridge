@@ -1,14 +1,22 @@
 /**
  * src/api.js — API client for ShiftBridge backend.
  *
- * All functions return Promises. Uses relative /api endpoints so the
- * frontend works from any host (localhost or laptop IP on the LAN).
+ * All functions return Promises. Vercel static deployments use the
+ * designated Render backend; local/same-origin builds use relative /api.
  *
  * No authentication — this is a hackathon demo. Demo identity is passed
  * as `userId` in request bodies or query params.
  */
 
-const BASE = '/api';
+// Vercel serves the static UI, not the Express backend. Calling relative /api
+// there returns a Vercel NOT_FOUND error, including for chat POST requests.
+// Using the Render URL for *.vercel.app also avoids proxying the long-lived
+// EventSource connection through Vercel. Custom domains use vercel.json rewrites.
+const IS_VERCEL = typeof window !== 'undefined'
+  && window.location.hostname.endsWith('.vercel.app');
+const BASE = IS_VERCEL
+  ? 'https://shiftbridge-yua0.onrender.com/api'
+  : '/api';
 
 /** Generic fetch wrapper with JSON handling. */
 async function request(method, path, body = null) {
@@ -21,7 +29,7 @@ async function request(method, path, body = null) {
   const text = await res.text();
   let json;
   try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text }; }
-  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(json.error || `Backend API error (HTTP ${res.status})`);
   return json;
 }
 
