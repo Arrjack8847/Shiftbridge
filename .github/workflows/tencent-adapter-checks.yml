@@ -30,3 +30,4 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run test:tencent
+      - run: npm run test:vercel-proxy
