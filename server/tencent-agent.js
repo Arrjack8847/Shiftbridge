@@ -7,19 +7,40 @@
  * Architecture:
  *   1. New message saved → createJob() in ai_jobs table (same as Groq)
  *   2. setImmediate → processMessage() fires async (non-blocking)
- *   3. processMessage() calls CodeBuddy serve HTTP API (POST /api/v1/runs)
- *      with a prompt instructing the AI to use ShiftBridge MCP tools
+ *   3. processMessage() triggers CodeBuddy agent via one of two modes:
+ *      a) "serve" mode (default): HTTP API (POST /api/v1/runs) to a running
+ *         `codebuddy --serve` instance on port 8080
+ *      b) "cli" mode: Spawns `codebuddy -p` as a child process with
+ *         controlled env vars and restricted MCP permissions
  *   4. CodeBuddy agent processes using MCP tools (get_workspace_rules,
  *      get_active_tasks, get_recent_messages, create_manager_task, etc.)
- *   5. Adapter polls for completion, marks job completed
- *   6. If CodeBuddy serve is not available, job stays pending for
- *      hourly automation recovery
+ *   5. Adapter marks job completed/failed, logs to ai_analysis_log
+ *   6. If CodeBuddy is not available, job stays pending for hourly recovery
  *
- * CodeBuddy Serve Configuration:
- *   CODEBUDDY_SERVE_URL — Optional. Default: http://127.0.0.1:8080
- *   The serve instance must be started with:
- *     codebuddy --serve --port 8080 --auth none
- *   And have the ShiftBridge MCP server configured in ~/.codebuddy/.mcp.json
+ * Configuration:
+ *   CODEBUDDY_EXECUTION_MODE — "serve" (default) or "cli"
+ *   CODEBUDDY_SERVE_URL — Serve mode only. Default: http://127.0.0.1:8080
+ *   CODEBUDDY_GATEWAY_PASSWORD — Serve mode. Gateway auth password.
+ *   CODEBUDDY_CLI_PATH — CLI mode. Path to codebuddy binary.
+ *     Default: "codebuddy" (looked up in PATH)
+ *   CODEBUDDY_CLI_TIMEOUT_MS — CLI mode. Default: 120000 (2 min)
+ *   CODEBUDDY_DEFER_TOOL_LOADING — CLI mode. Set to "false" to make
+ *     MCP tools non-deferred (directly in model's tool list)
+ *   AI_PROVIDER — Set to "tencent-local" to enable (default), "groq" to disable
+ *
+ * CLI mode safety:
+ *   - NODE_OPTIONS is cleared to avoid the WorkBuddy shim interfering
+ *     with the global npm CodeBuddy binary's axios proxy setup
+ *   - --permission-mode dontAsk prevents interactive prompts
+ *   - --allowedTools restricts to ShiftBridge MCP tools + Read/Grep
+ *   - --disallowedTools blocks Bash, Edit, Write, PowerShell
+ *   - --max-turns limits agent execution depth
+ *   - Timeout kills the process if it runs too long
+ *   - The MCP server config in mcp-shiftbridge-only.json has defer_loading: false
+ *
+ * Serve mode safety:
+ *   - The serve instance should be started with --permission-mode dontAsk
+ *   - CODEBUDDY_DEFER_TOOL_LOADING=false makes MCP tools non-deferred
  *
  * Safety:
  *   - The system prompt enforces workspace rules and protected categories
@@ -32,19 +53,41 @@
  *   - The hourly automation can call processPendingJobs() as recovery
  *   - Max 3 retry attempts per job
  *   - Never resets the database
- *
- * Groq code is preserved in version control (git commit) but disabled
- * when AI_PROVIDER=tencent-local.
  */
 
 import { getDB, bumpRevision } from './db.js';
+import { spawn } from 'node:child_process';
 
 const CODEBUDDY_SERVE_URL = process.env.CODEBUDDY_SERVE_URL || 'http://127.0.0.1:8080';
+const CODEBUDDY_GATEWAY_PASSWORD = process.env.CODEBUDDY_GATEWAY_PASSWORD || '';
 const SHIFTBRIDGE_API = process.env.SHIFTBRIDGE_API || 'http://localhost:3000/api';
 const TENCENT_ENABLED = process.env.AI_PROVIDER !== 'groq'; // Enabled by default
 const MAX_ATTEMPTS = 3;
-const RUN_TIMEOUT_MS = 60000; // 60 second timeout for CodeBuddy runs
+const RUN_TIMEOUT_MS = 60000; // 60 second timeout for CodeBuddy serve runs
 const POLL_INTERVAL_MS = 3000; // Poll every 3 seconds
+
+// CLI mode configuration
+const EXECUTION_MODE = process.env.CODEBUDDY_EXECUTION_MODE || 'serve'; // 'serve' or 'cli'
+const CODEBUDDY_CLI_PATH = process.env.CODEBUDDY_CLI_PATH || 'codebuddy';
+const CODEBUDDY_CLI_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_CLI_TIMEOUT_MS || '120000', 10);
+const CODEBUDDY_CLI_MAX_TURNS = parseInt(process.env.CODEBUDDY_CLI_MAX_TURNS || '5', 10);
+// Read-only tools for TEST 1; write tools can be added for TEST 2
+const CODEBUDDY_CLI_ALLOWED_TOOLS = process.env.CODEBUDDY_CLI_ALLOWED_TOOLS ||
+  'mcp__shiftbridge__get_active_tasks,mcp__shiftbridge__get_workspace_rules,mcp__shiftbridge__get_recent_messages,mcp__shiftbridge__list_tasks,mcp__shiftbridge__get_audit_trail,Read,Grep,Glob';
+const CODEBUDDY_CLI_DISALLOWED_TOOLS = process.env.CODEBUDDY_CLI_DISALLOWED_TOOLS ||
+  'Bash,Edit,Write,PowerShell,TaskCreate,TaskUpdate,TaskDelete';
+
+// Common headers for all CodeBuddy Serve API requests
+function serveHeaders(extra = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-CodeBuddy-Request': '1',
+  };
+  if (CODEBUDDY_GATEWAY_PASSWORD) {
+    headers['Authorization'] = `Bearer ${CODEBUDDY_GATEWAY_PASSWORD}`;
+  }
+  return { ...headers, ...extra };
+}
 
 // Track in-flight jobs to prevent concurrent processing
 const inFlight = new Set();
@@ -82,6 +125,7 @@ async function checkServeAvailable() {
   }
   try {
     const res = await fetch(`${CODEBUDDY_SERVE_URL}/api/v1/health`, {
+      headers: serveHeaders(),
       signal: AbortSignal.timeout(3000),
     });
     serveAvailable = res.ok;
@@ -158,10 +202,7 @@ async function triggerCodeBuddyServe(workspaceId, messageId, messageUser, messag
   // POST /api/v1/runs — Gateway Protocol format
   const runRes = await fetch(`${CODEBUDDY_SERVE_URL}/api/v1/runs`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-CodeBuddy-Request': '1',
-    },
+    headers: serveHeaders(),
     body: JSON.stringify({
       id: runId,
       type: 'message',
@@ -194,7 +235,7 @@ async function triggerCodeBuddyServe(workspaceId, messageId, messageUser, messag
 
     const statusRes = await fetch(
       `${CODEBUDDY_SERVE_URL}/api/v1/runs/${actualRunId}`,
-      { headers: { 'X-CodeBuddy-Request': '1' } },
+      { headers: serveHeaders() },
     );
     const statusData = await statusRes.json();
     const active = statusData.data?.active;
@@ -211,6 +252,184 @@ async function triggerCodeBuddyServe(workspaceId, messageId, messageUser, messag
 
   // Timed out
   throw new Error(`CodeBuddy run ${actualRunId} timed out after ${RUN_TIMEOUT_MS}ms`);
+}
+
+// ─── Parse CodeBuddy stream-json output ──────────────────────────
+function parseStreamJsonOutput(stdout) {
+  const lines = stdout.trim().split('\n');
+  let text = '';
+  const toolCalls = [];
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      // stream-json format: each line is a JSON object with a "type" field
+      if (obj.type === 'assistant' && obj.message?.content) {
+        for (const block of obj.message.content) {
+          if (block.type === 'text') {
+            text += block.text;
+          } else if (block.type === 'tool_use') {
+            toolCalls.push({ name: block.name, input: block.input });
+          }
+        }
+      } else if (obj.type === 'result') {
+        // Final result line — may contain the summary text
+        if (obj.subtype === 'success' && obj.result) {
+          text = text || obj.result;
+        }
+      }
+    } catch {
+      // Skip non-JSON lines (e.g., "fetch config failed" warnings)
+    }
+  }
+
+  return { text, toolCalls };
+}
+
+// ─── Trigger CodeBuddy CLI to process a message ──────────────────
+async function triggerCodeBuddyCLI(workspaceId, messageId, messageUser, messageBody, context) {
+  const prompt = buildAgentPrompt(workspaceId, messageId, messageUser, messageBody, context);
+  const startTime = Date.now();
+
+  // Build a clean environment for the child process that replicates the
+  // external PowerShell environment where `codebuddy -p` is verified working.
+  //
+  // The WorkBuddy desktop injects several env vars that break the global npm
+  // CodeBuddy binary:
+  //   NODE_OPTIONS=--require=".../node-language-shim.cjs"
+  //     → The shim breaks axios proxy setup ("instanceof is not callable")
+  //   CODEBUDDY_FORCE_LITE_WB_BUNDLE=1
+  //     → Forces the lite WB bundle (codebuddy-lite-wb.mjs) which has the
+  //       setProxy TypeError; the default bundle doesn't have this issue
+  //   CODEBUDDY_FORCE_HEADLESS_BUNDLE=1
+  //     → Forces the headless bundle variant
+  //   CODEBUDDY_MCP_CONFIG={...}
+  //     → Contains shiftbridge WITHOUT defer_loading:false; the file-based
+  //       config at ~/.codebuddy/.mcp.json has defer_loading:false
+  //   CODEBUDDY_CONFIG_DIR=.../.workbuddy-ai
+  //     → Points to WorkBuddy's config; external PowerShell uses ~/.codebuddy
+  //   CODEBUDDY_HOST=workbuddy-desktop
+  //     → Identifies as WorkBuddy desktop, triggers different code paths
+  //
+  // By deleting these vars, the child process uses the same configuration
+  // as the external PowerShell: default config dir (~/.codebuddy), file-based
+  // MCP config (with defer_loading:false), and the standard CodeBuddy bundle.
+  const childEnv = { ...process.env };
+
+  // Delete WorkBuddy-specific env vars to replicate external PowerShell
+  delete childEnv.NODE_OPTIONS;
+  delete childEnv.CODEBUDDY_FORCE_LITE_WB_BUNDLE;
+  delete childEnv.CODEBUDDY_FORCE_HEADLESS_BUNDLE;
+  delete childEnv.CODEBUDDY_MCP_CONFIG;
+  delete childEnv.CODEBUDDY_HOST;
+  delete childEnv.CODEBUDDY_CONFIG_DIR;
+  // CODEBUDDY_SERVICE_PROXY_URL points to the WorkBuddy daemon's port (64580).
+  // The CLI tries to listen on this port, causing EADDRINUSE since the daemon
+  // is already running. External PowerShell doesn't have this var.
+  delete childEnv.CODEBUDDY_SERVICE_PROXY_URL;
+  // Clear WorkBuddy safe-delete vars (they reference desktop-specific paths)
+  delete childEnv.CODEBUDDY_SAFE_DELETE_BIN_DIR;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_BROKER_DELETE;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_BULK_GUARD;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_ENABLED;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_REPORT_PATH;
+  delete childEnv.CODEBUDDY_SAFE_DELETE_SANDBOX;
+  // Clear sandbox IPC (desktop-specific)
+  delete childEnv.SANDBOX_CENTER_IPC_ADDRESS;
+
+  // Set deferred loading to false as a safety net (the file-based MCP config
+  // already has defer_loading:false, but this covers any other MCP servers)
+  childEnv.CODEBUDDY_DEFER_TOOL_LOADING = 'false';
+
+  // On Windows, the `codebuddy` command is a .cmd wrapper that calls:
+  //   node "C:\...\node_modules\@tencent-ai\codebuddy-code\bin\codebuddy" %*
+  // We can't use spawn() without shell:true for .cmd files, and shell:true
+  // would re-introduce quoting issues with the long prompt. Instead, we
+  // call node.exe directly with the JS entry point as the first argument.
+  // This is the same approach the .cmd wrapper uses, just without the shell.
+  const nodeBin = process.env.CODEBUDDY_NODE_BIN || process.execPath;
+  // Resolve the CodeBuddy JS entry point from the global npm install.
+  // The path is: <npm-global>/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy
+  // CODEBUDDY_CLI_SCRIPT can override this if needed.
+  const codebuddyScript = process.env.CODEBUDDY_CLI_SCRIPT ||
+    'C:\\Users\\ASUS\\AppData\\Roaming\\npm\\node_modules\\@tencent-ai\\codebuddy-code\\bin\\codebuddy';
+
+  // Build CLI arguments (the JS entry point is the first arg to node)
+  const args = [
+    codebuddyScript,
+    '-p', prompt,                         // Positional prompt (primary input)
+    '--max-turns', String(CODEBUDDY_CLI_MAX_TURNS),
+    '--permission-mode', 'dontAsk',
+    '--allowedTools', CODEBUDDY_CLI_ALLOWED_TOOLS,
+    '--disallowedTools', CODEBUDDY_CLI_DISALLOWED_TOOLS,
+    '--output-format', 'stream-json',
+  ];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(nodeBin, args, {
+      env: childEnv,
+      shell: false,       // Direct execution, no shell quoting issues
+      windowsHide: true,
+      cwd: process.cwd(),
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    // Timeout: kill the process if it runs too long
+    const timeoutHandle = setTimeout(() => {
+      if (!child.killed) {
+        child.kill('SIGTERM');
+        // Give it 5 seconds to clean up, then force kill
+        setTimeout(() => {
+          try { child.kill('SIGKILL'); } catch {}
+        }, 5000);
+      }
+    }, CODEBUDDY_CLI_TIMEOUT_MS);
+
+    child.on('close', (code, signal) => {
+      clearTimeout(timeoutHandle);
+
+      if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+        reject(new Error(`CodeBuddy CLI timed out after ${CODEBUDDY_CLI_TIMEOUT_MS}ms`));
+        return;
+      }
+
+      if (code !== 0) {
+        const errSnippet = stderr.slice(0, 500) || stdout.slice(0, 500);
+        reject(new Error(`CodeBuddy CLI exited with code ${code}: ${errSnippet}`));
+        return;
+      }
+
+      // Parse the stream-json output
+      const result = parseStreamJsonOutput(stdout);
+      const latency = Date.now() - startTime;
+
+      resolve({
+        runId: `cli-${messageId}-${Date.now()}`,
+        completed: true,
+        latency,
+        output: result.text,
+        toolCalls: result.toolCalls,
+      });
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timeoutHandle);
+      reject(new Error(`Failed to spawn CodeBuddy CLI (${nodeBin} ${codebuddyScript}): ${err.message}`));
+    });
+  });
 }
 
 // ─── Create a job in the ai_jobs table ────────────────────────────
@@ -284,22 +503,27 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
   const startTime = Date.now();
 
   try {
-    // Check if CodeBuddy serve is available
-    const serveOk = await checkServeAvailable();
+    // For CLI mode, skip the serve availability check
+    const useCli = EXECUTION_MODE === 'cli';
 
-    if (!serveOk) {
-      // CodeBuddy serve not available — job stays pending for hourly automation
-      updateJob(jobId, {
-        status: 'pending',
-        last_error: 'CodeBuddy serve not available — will be processed by hourly automation',
-      });
-      return {
-        ok: false,
-        skipped: true,
-        reason: 'CodeBuddy serve not available — pending for automation recovery',
-        jobId,
-        willRetry: true,
-      };
+    if (!useCli) {
+      // Serve mode: check if CodeBuddy serve is available
+      const serveOk = await checkServeAvailable();
+
+      if (!serveOk) {
+        // CodeBuddy serve not available — job stays pending for hourly automation
+        updateJob(jobId, {
+          status: 'pending',
+          last_error: 'CodeBuddy serve not available — will be processed by hourly automation',
+        });
+        return {
+          ok: false,
+          skipped: true,
+          reason: 'CodeBuddy serve not available — pending for automation recovery',
+          jobId,
+          willRetry: true,
+        };
+      }
     }
 
     // Update job to processing
@@ -308,13 +532,19 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
     // Fetch workspace context
     const context = await fetchContext(workspaceId);
 
-    // Trigger CodeBuddy serve to process the message
-    const result = await triggerCodeBuddyServe(
-      workspaceId, messageId, messageUser, messageBody, context,
-    );
+    // Trigger CodeBuddy to process the message (serve or CLI mode)
+    const result = useCli
+      ? await triggerCodeBuddyCLI(workspaceId, messageId, messageUser, messageBody, context)
+      : await triggerCodeBuddyServe(workspaceId, messageId, messageUser, messageBody, context);
 
     const totalLatency = Date.now() - startTime;
     const ts = Date.now();
+
+    // Build summary including tool calls if available (CLI mode)
+    const toolCallSummary = result.toolCalls && result.toolCalls.length > 0
+      ? ` Tools called: ${result.toolCalls.map(t => t.name).join(', ')}.`
+      : '';
+    const outputSummary = result.output ? ` Output: ${result.output.slice(0, 200)}` : '';
 
     // Log to ai_analysis_log
     const logId = `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -325,7 +555,7 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
     ).run(
       logId, workspaceId, ts, context.messages.length,
       context.messages.length > 0 ? context.messages[context.messages.length - 1].seq : 0,
-      `Tencent AI (CodeBuddy): Run ${result.runId} completed in ${result.latency}ms. Agent used MCP tools directly.`,
+      `Tencent AI (${useCli ? 'CLI' : 'Serve'}): Run ${result.runId} completed in ${result.latency}ms.${toolCallSummary}${outputSummary}`,
       ts,
     );
 
@@ -335,7 +565,13 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
     updateJob(jobId, {
       status: 'completed',
       last_error: '',
-      actions_json: JSON.stringify({ runId: result.runId, agent: 'tencent-codebuddy' }),
+      actions_json: JSON.stringify({
+        runId: result.runId,
+        agent: 'tencent-codebuddy',
+        mode: useCli ? 'cli' : 'serve',
+        toolCalls: result.toolCalls || [],
+        output: result.output || '',
+      }),
       latency_ms: totalLatency,
       model_used: 'tencent-codebuddy',
       completed_at: ts,
@@ -345,7 +581,7 @@ export async function processMessage(workspaceId, messageId, messageUser, messag
       ok: true,
       jobId,
       actions: [{ type: 'tencent_agent_run', ok: true, runId: result.runId }],
-      analysis: `Tencent AI agent processed via CodeBuddy serve. Run ${result.runId}.`,
+      analysis: `Tencent AI agent processed via CodeBuddy ${useCli ? 'CLI' : 'serve'}. Run ${result.runId}.${toolCallSummary}`,
       latency: totalLatency,
       model: 'tencent-codebuddy',
     };
@@ -468,8 +704,10 @@ export function getTencentStatus(workspaceId) {
 
   return {
     provider: 'tencent-local',
+    executionMode: EXECUTION_MODE,
     serveUrl: CODEBUDDY_SERVE_URL,
     serveAvailable: serveAvailable,
+    cliPath: EXECUTION_MODE === 'cli' ? CODEBUDDY_CLI_PATH : undefined,
     enabled: TENCENT_ENABLED,
     stats: {
       total: stats.total || 0,
