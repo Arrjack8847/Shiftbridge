@@ -91,6 +91,7 @@ const api = {
 
   // ── Silent AI Analysis Monitoring (Phase 5) ────────────────────────
   getAIStatus: (ws) => request('GET', `/workspaces/${ws}/ai-status`),
+  getGroqStatus: (ws) => request('GET', `/workspaces/${ws}/groq-status`),
   logAIAnalysis: (ws, data) => request('POST', `/workspaces/${ws}/ai-log`, data),
 
   // ── Phase 6: Manager-direct task, issue flagging, announcements ──
