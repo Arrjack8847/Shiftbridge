@@ -41,19 +41,16 @@ import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
 // ── AI Provider Selection ───────────────────────────────────────────
 // AI_PROVIDER controls which AI backend is used:
-//   "tencent-local" (default) → Tencent AI via CodeBuddy serve + MCP tools
-//   "groq"                    → Legacy Groq API (code preserved in git)
-//
-// Groq code is kept in groq-agent.js and git history. When tencent-local
-// is active, groq-agent.js is imported only for backward-compatible status.
+//   "groq" (default)        → Groq hosted API; no CodeBuddy installation needed
+//   "tencent-local"         → optional legacy Tencent CodeBuddy adapter
+// Only one provider processes a chat message; no duplicated AI agents.
 import {
   processMessage as tencentProcessMessage,
   processPendingJobs as tencentProcessPending,
   getTencentStatus,
 } from './tencent-agent.js';
 
-// Legacy Groq agent — only loaded for backward-compatible status endpoint
-// and the AI_PROVIDER=groq fallback path. Active code is tencent-agent.js.
+// Groq API is the active Agent V2 provider; Tencent is legacy opt-in.
 import {
   processMessage as groqProcessMessage,
   processPendingJobs as groqProcessPending,
@@ -61,19 +58,14 @@ import {
 } from './groq-agent.js';
 
 // Provider-agnostic dispatch (Phase D — prevent dual AI systems)
-const AI_PROVIDER = process.env.AI_PROVIDER || 'tencent-local';
+const AI_PROVIDER = process.env.AI_PROVIDER || 'groq';
 function dispatchProcessMessage(workspaceId, messageId, user, body) {
-  if (AI_PROVIDER === 'groq') {
-    // Legacy path — only used when AI_PROVIDER=groq is explicitly set
-    return groqProcessMessage(workspaceId, messageId, user, body);
-  }
-  return tencentProcessMessage(workspaceId, messageId, user, body);
+  return AI_PROVIDER === 'tencent-local'
+    ? tencentProcessMessage(workspaceId, messageId, user, body)
+    : groqProcessMessage(workspaceId, messageId, user, body);
 }
 async function dispatchProcessPending() {
-  if (AI_PROVIDER === 'groq') {
-    return groqProcessPending();
-  }
-  return tencentProcessPending();
+  return AI_PROVIDER === 'tencent-local' ? tencentProcessPending() : groqProcessPending();
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -390,9 +382,7 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
     // Route obvious fault reports in milliseconds; avoid launching the full
     // CodeBuddy CLI for simple warnings and low-value acknowledgments.
     // Other language (including questions/ambiguous problems) goes to AI.
-    const intent = AI_PROVIDER === 'tencent-local'
-      ? classifyIncomingMessage(text.slice(0, 1500))
-      : { route: 'ai' };
+    const intent = classifyIncomingMessage(text.slice(0, 1500));
     if (intent.route === 'issue') {
       try {
         const issueId = recordAutoWarning(req.workspaceId, msgId, user, text.slice(0, 1500), intent);
@@ -404,7 +394,7 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
     }
 
     // The chat response is immediate; complex tasks and ambiguous messages
-    // still receive Tencent semantic analysis in a non-blocking callback.
+    // still receive Groq semantic analysis in a non-blocking callback.
     // Very simple low-risk manager assignments can use the *existing*
     // validated manager-task endpoint directly, without CodeBuddy startup.
     // Server-side checks still enforce manager identity, member assignments,
@@ -425,9 +415,9 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
           const task = await response.json();
           console.log(`[fast-task] Routine manager task ${task.id} created from ${msgId}`);
         }).catch(err => {
-          console.error('[fast-task] Falling back to Tencent AI:', err.message);
+          console.error('[fast-task] Falling back to configured AI:', err.message);
           dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
-            .catch(aiError => console.error('[fast-task] Tencent fallback failed:', aiError.message));
+            .catch(aiError => console.error('[fast-task] AI fallback failed:', aiError.message));
         });
       });
     } else if (intent.route === 'ai' || intent.route === 'routine-task' ||
@@ -1433,11 +1423,11 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
 
 // ── AI Integration Endpoints ─────────────────────────────────────────
 //
-// Tencent AI (default provider):
+// Tencent AI (legacy opt-in provider):
 //   GET  /api/workspaces/:workspace/tencent-status — Tencent agent status
 //   POST /api/tencent/retry-pending                — Recovery: retry pending jobs
 //
-// Legacy Groq AI (backward compat, disabled when AI_PROVIDER=tencent-local):
+// Groq AI (default Agent V2 provider):
 //   GET  /api/workspaces/:workspace/groq-status    — Groq agent status
 //   POST /api/groq/retry-pending                   — Recovery: retry pending jobs
 
@@ -1564,12 +1554,12 @@ app.post('/api/tencent/jobs/:jobId/complete', (req, res) => {
   res.json({ ok: true, jobId, status: 'completed', actions: actions || [] });
 });
 
-/** GET /api/workspaces/:workspace/groq-status — Legacy Groq agent monitoring. */
+/** GET /api/workspaces/:workspace/groq-status — active Groq agent monitoring. */
 app.get('/api/workspaces/:workspace/groq-status', validateWorkspace, (req, res) => {
   res.json(getGroqStatus(req.workspaceId));
 });
 
-/** POST /api/groq/retry-pending — legacy recovery endpoint (kept for backward compat). */
+/** POST /api/groq/retry-pending — recover queued Groq jobs. */
 app.post('/api/groq/retry-pending', async (_req, res) => {
   const result = await dispatchProcessPending();
   res.json(result);
@@ -2466,7 +2456,7 @@ const server = app.listen(PORT, HOST, () => {
   } catch { /* ignore */ }
   console.log(`\n  API:       http://${HOST}:${PORT}/api/workspaces`);
   console.log(`  SSE:       http://${HOST}:${PORT}/api/events?workspace=daily`);
-  console.log(`  AI:        provider=${AI_PROVIDER}, poll=30s${AI_PROVIDER === 'tencent-local' ? ', CodeBuddy serve=' + (process.env.CODEBUDDY_SERVE_URL || 'http://127.0.0.1:8080') : ''}`);
+  console.log(`  AI:        provider=${AI_PROVIDER}, poll=30s${AI_PROVIDER === 'groq' ? ', model=' + (process.env.GROQ_MODEL || 'openai/gpt-oss-120b') : ', CodeBuddy opt-in'}`);
   console.log('');
 });
 
