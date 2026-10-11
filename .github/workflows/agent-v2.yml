@@ -1,0 +1,33 @@
+name: Agent V2 checks
+
+on:
+  push:
+    branches:
+      - feat/agent-v2-context-memory-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout Agent V2 branch
+        uses: actions/checkout@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: Fast-intent regression suite
+        run: npm run test:messages
+      - name: Tencent adapter mock/evidence suite
+        run: npm run test:tencent
+      - name: Agent V2 isolated API suite
+        run: npm run test:agent-v2
