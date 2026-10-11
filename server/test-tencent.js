@@ -14,6 +14,7 @@ import {
   parseStreamJsonOutput,
   validateAgentEvidence,
   nextAttempt,
+  buildIsolatedMcpConfig,
 } from './tencent-agent.js';
 
 const callId = 'toolu_shiftbridge_read_1';
@@ -99,3 +100,24 @@ test('retry cannot exceed maximum', () => {
 
 // Real CodeBuddy → MCP → task creation must be tested separately in an
 // isolated runtime. No fabricated success marker is accepted as an E2E test.
+
+test('isolated CLI config binds MCP to exactly the selected backend', () => {
+  const config = buildIsolatedMcpConfig(
+    'http://127.0.0.1:3001/api',
+    'http://127.0.0.1:3001/api',
+    '/usr/bin/node',
+    '/tmp/shiftbridge/server/mcp-server.js',
+  );
+  assert.equal(config.mcpServers.shiftbridge.env.SHIFTBRIDGE_API, 'http://127.0.0.1:3001/api');
+  assert.equal(config.mcpServers.shiftbridge.defer_loading, false);
+  assert.equal(Object.keys(config.mcpServers).length, 1);
+});
+
+test('isolated CLI config rejects mismatched backend ports and non-local targets', () => {
+  assert.throws(() => buildIsolatedMcpConfig(
+    'http://127.0.0.1:3000/api', 'http://127.0.0.1:3001/api', 'node', 'mcp-server.js',
+  ), /must exactly match/);
+  assert.throws(() => buildIsolatedMcpConfig(
+    'https://example.com/api', 'https://example.com/api', 'node', 'mcp-server.js',
+  ), /Isolated MCP target/);
+});
