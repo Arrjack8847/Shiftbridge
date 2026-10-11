@@ -16,6 +16,18 @@ function safeID(prefix) {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function seedPeople(d) {
+  const profiles = [
+    ['jack', 'Jack', 'J', 'sea', 'Employee', 0],
+    ['emma', 'Emma', 'E', 'lavender', 'Employee', 1],
+    ['sarah', 'Sarah', 'S', 'rose', 'Shift Lead', 2],
+    ['manager', 'Manager', 'M', 'orange', 'Administrator', 3],
+    ['liam', 'Liam', 'L', 'blue', 'Employee', 4],
+  ];
+  const insert = d.prepare('INSERT OR IGNORE INTO people (id,name,initials,hue,role,sort_order) VALUES (?,?,?,?,?,?)');
+  for (const profile of profiles) insert.run(...profile);
+}
+
 function seedWorkspaces(d) {
   // Check if already seeded.
   const existing = d.prepare('SELECT COUNT(*) as c FROM workspaces').get();
@@ -120,6 +132,7 @@ function seedWorkspaces(d) {
 export function seedDatabase() {
   const d = getDB();
   initSchema();
+  seedPeople(d);
   seedWorkspaces(d);
   bumpRevision();
 }
