@@ -35,7 +35,7 @@ const api = {
   updateWorkspace: (id, data) => request('PUT', `/workspaces/${id}`, data),
 
   // ── Messages ──────────────────────────────────────────────────────
-  getMessages: (ws, since = 0) => request('GET', `/workspaces/${ws}/messages?since=${since}`),
+  getMessages: (ws, since = 0) => request('GET', `/workspaces/${ws}/messages?since=${since}${since ? '' : '&latest=1'}`),
   sendMessage: (ws, { id, user, body }) =>
     request('POST', `/workspaces/${ws}/messages`, { id, user, body }),
 
@@ -48,6 +48,10 @@ const api = {
   // ── Issues ────────────────────────────────────────────────────────
   getIssues: (ws) => request('GET', `/workspaces/${ws}/issues`),
   getIssue: (id) => request('GET', `/issues/${id}`),
+  getIncidentContext: (ws) => request('GET', `/workspaces/${ws}/incident-context`),
+  linkIncidentMessage: (ws, issueId, body) => request('POST', `/workspaces/${ws}/incidents/${issueId}/link-message`, body),
+  getAgentFeedback: (ws, reviewerId) => request('GET', `/workspaces/${ws}/agent-feedback?reviewerId=${encodeURIComponent(reviewerId)}`),
+  submitAgentFeedback: (ws, body) => request('POST', `/workspaces/${ws}/agent-feedback`, body),
   updateIssue: (id, data) => request('PUT', `/issues/${id}`, data),
 
   // ── Rules ─────────────────────────────────────────────────────────
