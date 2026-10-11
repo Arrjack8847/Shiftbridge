@@ -722,6 +722,10 @@ app.addEventListener('submit', async (event) => {
     form.querySelector('input[name="message"]').value = '';
     data.messages.push(msg); // Optimistic update; backend is source of truth.
     render();
+    // Tapping Send focuses the button; return keyboard focus to the new input.
+    if (currentWorkspace === sendWorkspace && route() === 'chat') {
+      app.querySelector('#send-message input[name="message"]')?.focus({ preventScroll: true });
+    }
 
     let sendError = null;
     try {
