@@ -331,8 +331,7 @@ app.post('/api/workspaces/:workspace/messages/:messageId/attachments', validateW
   try { bytes = parsePhoto(data, contentType); }
   catch (error) { return res.status(400).json({ error: error.message }); }
   const attachmentId = randomUUID();
-  const path = [req.workspaceId, message.id, attachmentId + '.' + PHOTO_TYPES[contentType]]
-    .map(encodeURIComponent).join('/');
+  const path = [req.workspaceId, message.id, attachmentId + '.' + PHOTO_TYPES[contentType]].join('/');
   // The trusted server is the only client using the secret key and private bucket.
   try {
     await uploadPhoto(path, bytes, contentType);
