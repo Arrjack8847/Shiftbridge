@@ -71,6 +71,9 @@ const POLL_INTERVAL_MS = 3000; // Poll every 3 seconds
 const EXECUTION_MODE = process.env.CODEBUDDY_EXECUTION_MODE || 'cli'; // CLI is the verified integration path; Serve is opt-in
 const CODEBUDDY_CLI_PATH = process.env.CODEBUDDY_CLI_PATH || 'codebuddy';
 const CODEBUDDY_CLI_TIMEOUT_MS = parseInt(process.env.CODEBUDDY_CLI_TIMEOUT_MS || '120000', 10);
+// For isolated integration tests, explicitly route the child MCP server to the
+// same backend that the parent agent uses; never inherit the desktop MCP config.
+const CODEBUDDY_CLI_MCP_TARGET = process.env.CODEBUDDY_CLI_MCP_TARGET || '';
 const CODEBUDDY_CLI_MAX_TURNS = parseInt(process.env.CODEBUDDY_CLI_MAX_TURNS || '10', 10);
 // Only these MCP tools are made available to the headless agent. --allowedTools
 // grants permission; it does NOT limit tool availability by itself.
@@ -341,6 +344,29 @@ export function nextAttempt(previousAttempts, maxAttempts) {
   return next;
 }
 
+// Build a dedicated MCP config for a local ShiftBridge test backend.
+export function buildIsolatedMcpConfig(target, backendApi, nodeExecutable, mcpScriptPath) {
+  const expected = new URL(backendApi);
+  const url = new URL(target);
+  if (url.href !== expected.href) {
+    throw new Error('CODEBUDDY_CLI_MCP_TARGET must exactly match SHIFTBRIDGE_API');
+  }
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' ||
+      !url.port || url.pathname !== '/api' || url.search || url.hash) {
+    throw new Error('Isolated MCP target must be http://127.0.0.1:<port>/api');
+  }
+  return {
+    mcpServers: {
+      shiftbridge: {
+        command: nodeExecutable,
+        args: [mcpScriptPath],
+        env: { SHIFTBRIDGE_API: url.href },
+        defer_loading: false,
+      },
+    },
+  };
+}
+
 // ─── Trigger CodeBuddy CLI to process a message ──────────────────
 async function triggerCodeBuddyCLI(workspaceId, messageId, messageUser, messageBody, context) {
   const prompt = buildAgentPrompt(workspaceId, messageId, messageUser, messageBody, context);
@@ -398,6 +424,18 @@ async function triggerCodeBuddyCLI(workspaceId, messageId, messageUser, messageB
   // already has defer_loading:false, but this covers any other MCP servers)
   childEnv.CODEBUDDY_DEFER_TOOL_LOADING = 'false';
   childEnv.SHIFTBRIDGE_API = SHIFTBRIDGE_API;
+  if (CLI_WRITE_ENABLED && !CODEBUDDY_CLI_MCP_TARGET) {
+    throw new Error('Write-enabled CodeBuddy CLI requires CODEBUDDY_CLI_MCP_TARGET and explicit backend routing');
+  }
+  if (CODEBUDDY_CLI_MCP_TARGET) {
+    const config = buildIsolatedMcpConfig(
+      CODEBUDDY_CLI_MCP_TARGET,
+      SHIFTBRIDGE_API,
+      process.execPath,
+      join(process.cwd(), 'server', 'mcp-server.js'),
+    );
+    childEnv.CODEBUDDY_MCP_CONFIG = JSON.stringify(config);
+  }
   // Only clear proxy env variables when explicitly requested: some users need a proxy.
   if (process.env.CODEBUDDY_CLI_CLEAR_PROXY === 'true') {
     for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) delete childEnv[key];
@@ -820,6 +858,7 @@ export function getTencentStatus(workspaceId) {
     cliPath: EXECUTION_MODE === 'cli' ? CODEBUDDY_CLI_PATH : undefined,
     enabled: TENCENT_ENABLED,
     cliWritesEnabled: CLI_WRITE_ENABLED,
+    isolatedMcpTargetConfigured: Boolean(CODEBUDDY_CLI_MCP_TARGET),
     stats: {
       total: stats.total || 0,
       completed: stats.completed || 0,
