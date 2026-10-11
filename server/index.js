@@ -592,7 +592,18 @@ app.put('/api/tasks/:id', (req, res) => {
 // ── Agent V2: inspect and link ongoing incident conversations ──
 app.get('/api/workspaces/:workspace/incident-context', validateWorkspace, (req, res) => {
   const d = getDB();
-  res.json({ incidents: workspaceIncidentContext(d, req.workspaceId, 10), revision: currentRevision() });
+  const feedbackExamples = d.prepare(
+    'SELECT f.verdict, f.note, f.message_id AS messageId, m.body AS message, f.created_at AS reviewedAt ' +
+    'FROM ai_feedback f JOIN messages m ON m.id=f.message_id AND m.workspace_id=f.workspace_id ' +
+    'WHERE f.workspace_id=? ORDER BY f.created_at DESC LIMIT 8'
+  ).all(req.workspaceId).map(f => ({
+    ...f, message:String(f.message || '').slice(0, 200), note:String(f.note || '').slice(0, 160),
+  }));
+  res.json({
+    incidents: workspaceIncidentContext(d, req.workspaceId, 10),
+    feedbackExamples,
+    revision: currentRevision(),
+  });
 });
 
 app.post('/api/workspaces/:workspace/incidents/:issueId/link-message', validateWorkspace, (req, res) => {
