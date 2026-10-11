@@ -151,7 +151,8 @@ const DEMO_PEOPLE = [
 ];
 
 app.get('/api/people', (_req, res) => {
-  res.json(DEMO_PEOPLE);
+  const rows = getDB().prepare('SELECT id,name,initials,hue,role FROM people ORDER BY sort_order,id').all();
+  res.json(rows.length ? rows : DEMO_PEOPLE);
 });
 
 // ── Protected task enforcement ─────────────────────────────────────
