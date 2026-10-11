@@ -389,6 +389,34 @@ function render() {
   }
 }
 
+// Live sync must not destroy the focused input on mobile. iOS will close the
+// software keyboard if its DOM node is replaced by innerHTML outside a tap.
+function renderLiveChatUpdate() {
+  const composer = app.querySelector('#send-message input[name="message"]');
+  const oldLog = app.querySelector('#chatMessages');
+  if (route() !== 'chat' || renderedChatWorkspace !== currentWorkspace ||
+      !composer || document.activeElement !== composer || !oldLog || activeDialog) {
+    render();
+    return;
+  }
+
+  const scratch = document.createElement('div');
+  scratch.innerHTML = chatScreen();
+  const newLog = scratch.querySelector('#chatMessages');
+  if (!newLog) { render(); return; }
+
+  const wasAtBottom = oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 80;
+  const oldScrollTop = oldLog.scrollTop;
+  oldLog.innerHTML = newLog.innerHTML;
+  oldLog.scrollTop = wasAtBottom ? oldLog.scrollHeight : oldScrollTop;
+
+  // Keep connection feedback current without disturbing the composer.
+  const existingWarning = app.querySelector('.chat-offline');
+  const nextWarning = scratch.querySelector('.chat-offline');
+  if (existingWarning && !nextWarning) existingWarning.remove();
+  else if (!existingWarning && nextWarning) oldLog.before(nextWarning);
+}
+
 // ── Event handlers ─────────────────────────────────────────────────
 
 window.addEventListener('hashchange', () => { openWorkspaces = false; render(); });
@@ -1066,12 +1094,12 @@ async function fullSync() {
     }
     const reconnected = connectionStatus !== 'online';
     connectionStatus = 'online';
-    if (syncRes.changed || reconnected) render();
+    if (syncRes.changed || reconnected) renderLiveChatUpdate();
   } catch (err) {
     const disconnected = connectionStatus !== 'offline';
     connectionStatus = 'offline';
     console.error('Sync failed:', err);
-    if (disconnected) render();
+    if (disconnected) renderLiveChatUpdate();
   }
 }
 
