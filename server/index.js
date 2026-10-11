@@ -305,7 +305,7 @@ function recordAutoWarning(workspaceId, messageId, senderId, body, intent) {
   if (existing) return existing.id;
 
   const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const title = `Possible ${intent.issueType} issue: ${body.replace(/\\s+/g, ' ').slice(0, 130)}`;
+  const title = `Possible ${intent.issueType} issue: ${body.replace(/\s+/g, ' ').slice(0, 130)}`;
   const ts = Date.now();
   const result = d.prepare(
     `INSERT OR IGNORE INTO issues
@@ -328,6 +328,14 @@ function recordAutoWarning(workspaceId, messageId, senderId, body, intent) {
   notifySSE(workspaceId, { type: 'issue', action: 'reported', id: issueId, messageId });
   return issueId;
 }
+
+/** Retrieve one source message for verified MCP issue reporting. */
+app.get('/api/workspaces/:workspace/messages/:messageId', validateWorkspace, (req, res) => {
+  const row = getDB().prepare('SELECT * FROM messages WHERE workspace_id = ? AND id = ?')
+    .get(req.workspaceId, req.params.messageId);
+  if (!row) return res.status(404).json({ error: 'Message not found in workspace' });
+  res.json(mapMessage(row));
+});
 
 /** POST /api/workspaces/:workspace/messages — create a message (idempotent by client ID). */
 app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => {
