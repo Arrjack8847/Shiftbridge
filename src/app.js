@@ -255,7 +255,7 @@ function attentionScreen() {
       (reviewedIssues.length + reviewedTasks.length) + ')</h2><div class="stack">' +
       reviewedIssues.map(issueRow).join('') + reviewedTasks.map(taskRow).join('') + '</div>' : '') +
     '<h2 class="section-title">Recent manager decisions</h2><div class="stack">' +
-    (data.attentionDecisions || []).slice().sort((a,b) => b.reviewedAt - a.reviewedAt).slice(0,15).map(d => {
+    ((data.attentionDecisions || []).slice().sort((a,b) => b.reviewedAt - a.reviewedAt).slice(0,15).map(d => {
       const target = d.type === 'issue' ? data.issues.find(i => i.id === d.entityId) : data.tasks.find(t => t.id === d.entityId);
       if (!target || target.ws !== currentWorkspace) return '';
       const dest = d.type === 'issue' ? 'manage/issue/' : 'task/';
