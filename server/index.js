@@ -644,10 +644,23 @@ app.post('/api/workspaces/:workspace/agent-feedback', validateWorkspace, (req, r
   const linked = d.prepare('SELECT 1 FROM issue_message_links WHERE workspace_id=? AND issue_id=? AND message_id=?')
     .get(req.workspaceId, issueId, messageId);
   if (!linked) return res.status(404).json({ error: 'Feedback must reference a real linked incident message' });
+  if (verdict === 'wrong_link') {
+    const issue = d.prepare('SELECT source FROM issues WHERE id=? AND workspace_id=?')
+      .get(issueId,req.workspaceId);
+    if (issue?.source === messageId) {
+      return res.status(400).json({error:'Original report must be reviewed as a false alarm, not detached as a follow-up'});
+    }
+  }
   const ts = Date.now();
   const id = 'fb_' + ts.toString(36) + '_' + Math.random().toString(36).slice(2,8);
   d.prepare('INSERT INTO ai_feedback (id,workspace_id,issue_id,message_id,verdict,note,reviewer_id,created_at) VALUES (?,?,?,?,?,?,?,?)')
     .run(id,req.workspaceId,issueId,messageId,verdict,note,reviewerId,ts);
+  if (verdict === 'wrong_link') {
+    // Keep the historical record visible but do not feed a disputed link
+    // back into Tencent as credible incident evidence.
+    d.prepare("UPDATE issue_message_links SET relation='disputed' WHERE workspace_id=? AND issue_id=? AND message_id=?")
+      .run(req.workspaceId,issueId,messageId);
+  }
   d.prepare('INSERT INTO audit_log (id,workspace_id,action,entity_type,entity_id,actor,details,created_at) VALUES (?,?,?,?,?,?,?,?)')
     .run('al_'+ts.toString(36)+'_'+Math.random().toString(36).slice(2,8),
       req.workspaceId,'ai_feedback_recorded','issue',issueId,reviewerId,verdict+' for message '+messageId,ts);
