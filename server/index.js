@@ -588,6 +588,72 @@ app.put('/api/tasks/:id', (req, res) => {
   res.json(mapTask(updated));
 });
 
+// ── Agent V2: inspect and link ongoing incident conversations ──
+app.get('/api/workspaces/:workspace/incident-context', validateWorkspace, (req, res) => {
+  const d = getDB();
+  res.json({ incidents: workspaceIncidentContext(d, req.workspaceId, 10), revision: currentRevision() });
+});
+
+app.post('/api/workspaces/:workspace/incidents/:issueId/link-message', validateWorkspace, (req, res) => {
+  const messageId = String(req.body.messageId || '').trim();
+  const reason = String(req.body.reason || '').trim().slice(0, 500);
+  const relation = String(req.body.relation || 'update');
+  if (!messageId || reason.length < 12) {
+    return res.status(400).json({ error: 'A real messageId and contextual reason (12+ characters) are required' });
+  }
+  const result = linkMessageToIssue(getDB(), {
+    workspaceId: req.workspaceId, issueId: req.params.issueId, messageId,
+    relation, reason, actor: 'silent-ai',
+  });
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (!result.duplicate) {
+    bumpRevision();
+    notifySSE(req.workspaceId, {type:'issue',action:'linked',id:req.params.issueId,messageId});
+  }
+  res.status(result.duplicate ? 200 : 201).json(result);
+});
+
+// This is review data for regression tests and prompt iteration, not
+// automatic model training or authority to resolve a protected incident.
+const AI_FEEDBACK_VERDICTS = new Set(['correct_issue','false_alarm','wrong_link','correct_link','missed_context']);
+app.post('/api/workspaces/:workspace/agent-feedback', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const reviewerId = String(req.body.reviewerId || '');
+  const verdict = String(req.body.verdict || '');
+  const issueId = String(req.body.issueId || '');
+  const messageId = String(req.body.messageId || '');
+  const note = String(req.body.note || '').trim().slice(0, 600);
+  if (reviewerId !== getWorkspaceManager(d, req.workspaceId)) {
+    return res.status(403).json({ error: 'Only the workspace demo manager can review AI detections' });
+  }
+  if (!AI_FEEDBACK_VERDICTS.has(verdict) || !issueId || !messageId) {
+    return res.status(400).json({ error: 'Valid verdict, issueId and messageId required' });
+  }
+  const linked = d.prepare('SELECT 1 FROM issue_message_links WHERE workspace_id=? AND issue_id=? AND message_id=?')
+    .get(req.workspaceId, issueId, messageId);
+  if (!linked) return res.status(404).json({ error: 'Feedback must reference a real linked incident message' });
+  const ts = Date.now();
+  const id = 'fb_' + ts.toString(36) + '_' + Math.random().toString(36).slice(2,8);
+  d.prepare('INSERT INTO ai_feedback (id,workspace_id,issue_id,message_id,verdict,note,reviewer_id,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(id,req.workspaceId,issueId,messageId,verdict,note,reviewerId,ts);
+  d.prepare('INSERT INTO audit_log (id,workspace_id,action,entity_type,entity_id,actor,details,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run('al_'+ts.toString(36)+'_'+Math.random().toString(36).slice(2,8),
+      req.workspaceId,'ai_feedback_recorded','issue',issueId,reviewerId,verdict+' for message '+messageId,ts);
+  bumpRevision();
+  notifySSE(req.workspaceId,{type:'feedback',id,issueId});
+  res.status(201).json({id,workspaceId:req.workspaceId,issueId,messageId,verdict,note,reviewerId,createdAt:ts});
+});
+
+app.get('/api/workspaces/:workspace/agent-feedback', validateWorkspace, (req, res) => {
+  const d = getDB();
+  if (String(req.query.reviewerId || '') !== getWorkspaceManager(d,req.workspaceId)) {
+    return res.status(403).json({error:'Only workspace demo manager can view feedback'});
+  }
+  const rows = d.prepare('SELECT id,workspace_id AS workspaceId,issue_id AS issueId,message_id AS messageId,verdict,note,reviewer_id AS reviewerId,created_at AS createdAt FROM ai_feedback WHERE workspace_id=? ORDER BY created_at DESC LIMIT 200')
+    .all(req.workspaceId);
+  res.json({feedback:rows,revision:currentRevision()});
+});
+
 // ── Issues ──────────────────────────────────────────────────────────
 
 /** GET /api/workspaces/:workspace/issues — list issues. */
