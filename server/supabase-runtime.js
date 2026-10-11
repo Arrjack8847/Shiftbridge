@@ -28,6 +28,7 @@ async function request(path,options={}){
   ...options,headers:{...baseHeaders(),...(options.headers||{})},signal:AbortSignal.timeout(30000)
  });
  if(!r.ok)throw new Error('Supabase HTTP '+r.status+' '+(await r.text()).slice(0,350));
+ if(options.method && options.method !== 'GET') return null;
  if(r.status===204)return null;
  return r.json();
 }
