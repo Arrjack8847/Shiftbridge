@@ -25,6 +25,9 @@ export default {
     if(!route||! /^[A-Za-z0-9_/-]+$/.test(route)||route.split("/").some(s=>s==="."||s==="..")||route.startsWith("/")){
       return json({error:"Invalid API route"},400);
     }
+    // Long-lived SSE is unreliable in short-running Vercel functions.
+    // HTTP 204 permanently closes EventSource; ShiftBridge's existing sync polling remains active.
+    if(route==="events")return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
     incoming.searchParams.delete("__sb_route");
     const upstream=new URL("/api/"+route,origin);
     upstream.search=incoming.search;
