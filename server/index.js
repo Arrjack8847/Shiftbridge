@@ -378,7 +378,33 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
 
     // The chat response is immediate; complex tasks and ambiguous messages
     // still receive Tencent semantic analysis in a non-blocking callback.
-    if (intent.route === 'ai' || (intent.route === 'issue' && intent.needsAi)) setImmediate(() => {
+    // Very simple low-risk manager assignments can use the *existing*
+    // validated manager-task endpoint directly, without CodeBuddy startup.
+    // Server-side checks still enforce manager identity, member assignments,
+    // category permissions, and source-message idempotency.
+    if (intent.route === 'routine-task' && user === getWorkspaceManager(d, req.workspaceId)) {
+      setImmediate(() => {
+        fetch(`http://127.0.0.1:${PORT}/api/workspaces/${encodeURIComponent(req.workspaceId)}/manager-task`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceMessageId: msgId,
+            ...intent.task,
+            description: `Explicit manager assignment in message ${msgId}`,
+            createdBy: 'fast-routine',
+          }),
+        }).then(async response => {
+          if (!response.ok) throw new Error(`Direct task rejected (${response.status}): ${(await response.text()).slice(0, 200)}`);
+          const task = await response.json();
+          console.log(`[fast-task] Routine manager task ${task.id} created from ${msgId}`);
+        }).catch(err => {
+          console.error('[fast-task] Falling back to Tencent AI:', err.message);
+          dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
+            .catch(aiError => console.error('[fast-task] Tencent fallback failed:', aiError.message));
+        });
+      });
+    } else if (intent.route === 'ai' || intent.route === 'routine-task' ||
+               (intent.route === 'issue' && intent.needsAi)) setImmediate(() => {
       dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
         .then(result => {
           if (result.ok) {
