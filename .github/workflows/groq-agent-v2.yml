@@ -1,0 +1,31 @@
+name: Groq Agent V2 integration
+
+on:
+  push:
+    branches:
+      - feat/agent-v2-groq-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  groq-mock-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: npm run check
+      - name: Warning classification
+        run: npm run test:messages
+      - name: Agent V2 isolated tests
+        run: npm run test:agent-v2
+      - name: Groq local mock integration
+        run: npm run test:groq
