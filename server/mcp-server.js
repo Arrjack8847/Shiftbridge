@@ -518,19 +518,23 @@ async function propose_chat_completion(args) {
       claimType,
     });
 
-    // Build a summary for the AI.
+    // Only an explicit completion can change task status. Progress and
+    // ambiguous messages are recorded without marking a task done.
     const protected_ = result.protectedTask ? ' [PROTECTED]' : '';
-    const summary = result.protectedTask
-      ? `Chat completion claim processed. Task "${result.task?.name}" moved to REVIEW — qualified verification required.${protected_}\n` +
-        `  Claim ID: ${result.claim?.id}\n` +
-        `  Verification applied: ${result.verificationApplied}\n` +
-        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
-        `  CRITICAL: This is an employee self-attestation, NOT independent proof. Qualified human verification required.`
-      : `Chat completion claim processed. Task "${result.task?.name}" marked DONE (self-attestation).${protected_}\n` +
-        `  Claim ID: ${result.claim?.id}\n` +
-        `  Verification applied: ${result.verificationApplied}\n` +
-        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
-        `  NOTE: This is a self-reported claim, NOT independent proof of completion.`;
+    const summary = claimType !== 'completion'
+      ? `Chat ${claimType} claim recorded for "${result.task?.name}". Task remains ${result.finalTaskStatus}; no completion asserted.\n` +
+        `  Claim ID: ${result.claim?.id}\n  Source message: ${messageId}`
+      : result.protectedTask
+        ? `Chat completion claim processed. Task "${result.task?.name}" moved to REVIEW — qualified verification required.${protected_}\n` +
+          `  Claim ID: ${result.claim?.id}\n` +
+          `  Verification applied: ${result.verificationApplied}\n` +
+          `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+          `  CRITICAL: This is an employee self-attestation, NOT independent proof. Qualified human verification required.`
+        : `Chat completion claim processed. Task "${result.task?.name}" marked DONE (self-attestation).${protected_}\n` +
+          `  Claim ID: ${result.claim?.id}\n` +
+          `  Verification applied: ${result.verificationApplied}\n` +
+          `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+          `  NOTE: This is a self-reported claim, NOT independent proof of completion.`;
 
     return {
       message: result.message,
