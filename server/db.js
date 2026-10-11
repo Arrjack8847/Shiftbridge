@@ -389,6 +389,50 @@ export function initSchema() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_jobs_msg ON ai_jobs(message_id);
   `);
 
+  // ── Agent V2 migrations: incident memory and manager feedback ──
+  {
+    const cols = d.prepare('PRAGMA table_info(issues)').all().map(c => c.name);
+    if (!cols.includes('entity_key')) d.exec('ALTER TABLE issues ADD COLUMN entity_key TEXT');
+    if (!cols.includes('last_activity_at')) d.exec('ALTER TABLE issues ADD COLUMN last_activity_at INTEGER');
+  }
+  d.exec(`
+    CREATE INDEX IF NOT EXISTS idx_issues_entity_active
+      ON issues(workspace_id, entity_key, status);
+    CREATE TABLE IF NOT EXISTS issue_message_links (
+      workspace_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      relation TEXT NOT NULL DEFAULT 'report',
+      created_by TEXT NOT NULL,
+      reasoning TEXT DEFAULT '',
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(workspace_id, message_id),
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_issue_links_timeline ON issue_message_links(workspace_id, issue_id, created_at);
+    CREATE TABLE IF NOT EXISTS ai_feedback (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      verdict TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      reviewer_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_feedback_workspace ON ai_feedback(workspace_id, created_at);
+    INSERT OR IGNORE INTO issue_message_links(workspace_id,issue_id,message_id,relation,created_by,reasoning,created_at)
+      SELECT i.workspace_id,i.id,m.id,'report','migration','Original issue source',i.created_at
+        FROM issues i JOIN messages m
+          ON m.id=i.source AND m.workspace_id=i.workspace_id
+       WHERE i.source IS NOT NULL;
+  `);
+
   // Initialize revision counter if not present.
   const row = d.prepare('SELECT value FROM meta WHERE key = ?').get('revision');
   if (!row) {
@@ -477,6 +521,8 @@ export function mapIssue(row) {
     verificationEvidence: row.verification_evidence || null,
     verifiedAt: row.verified_at || null,
     issueType: row.issue_type || 'general',
+    entityKey: row.entity_key || null,
+    lastActivityAt: row.last_activity_at || row.created_at,
     createdAt: row.created_at,
   };
 }
