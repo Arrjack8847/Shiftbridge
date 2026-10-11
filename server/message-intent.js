@@ -24,9 +24,9 @@ const INSTRUCTION = /\b(?:please|can\s+you|could\s+you|assign|ask\s+\w+\s+to|tel
  */
 export function parseFastRoutineTask(body) {
   const text = String(body || '').trim();
-  const match = text.match(/^([a-z][a-z'-]{1,24})[,]?[ ]+(?:please[ ]+)?(restock|refill|clean|tidy|organize|prepare|count|label|wipe|sweep|sort)[ ]+(.+)$/i);
+  const match = text.match(/^([a-z][a-z'-]{1,24})[,]?[ ]+(?:please[ ]+)?(restock|refill|clean|tidy|organize|count|label|wipe|sweep|sort)[ ]+(.+)$/i);
   if (!match) return null;
-  if (/\b(?:if|unless|because|after|when|while|not|never|don't|broken|repair|fix|electrical|danger|hazard|safe|unsafe|purchase|buy|pay|refund|replace|inspect|certify|approve)\b/i.test(text)) return null;
+  if (/\b(?:if|unless|because|after|when|while|not|never|don't|broken|repair|fix|electrical|danger|hazard|safe|unsafe|purchase|buy|pay|refund|replace|inspect|certify|approve|cash|money|register|payment|bank|salary|invoice|chemical|fire|gas|oven|machine|electrical|equipment|emergency|hazardous)\b/i.test(text)) return null;
 
   const assignee = match[1].toLowerCase();
   const verb = match[2].toLowerCase();
@@ -64,6 +64,9 @@ export function classifyIncomingMessage(body) {
 
   // A question may be an information request, not a report of an active fault.
   // Never create a warning for a conditional, negated, or resolved statement.
+  if (/^(?:i(?:'m| am)|we(?:'re| are)|you(?:'re| are))\\s+(?:so\\s+)?broken\\b/i.test(text)) {
+    return { route: 'ai', reason: 'personal-metaphor' };
+  }
   if (HYPOTHETICAL.test(text) || RESOLVED.test(text) || NEGATED.test(text) ||
       text.endsWith('?') || /\bbroken\s+heart\b/i.test(text)) {
     return { route: 'ai', reason: 'requires-context' };
