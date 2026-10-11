@@ -18,7 +18,7 @@ if (process.env.SUPABASE_SYNC_CONFIRM !== 'YES') {
 
 // Parents first for FK constraints. Child references point only to previously inserted parents.
 const tables = [
- 'workspaces','workspace_members','messages','tasks','issues','rules',
+ 'people','workspaces','workspace_members','messages','tasks','issues','rules',
  'audit_log','shifts','handovers','meta','ai_proposals','completion_claims',
  'ai_analysis_log','announcements','announcement_revisions',
  'announcement_acknowledgments','ai_jobs','issue_message_links','ai_feedback'
