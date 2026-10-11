@@ -1,0 +1,24 @@
+name: ShiftBridge attendance and chat checks
+on:
+  push:
+    branches: [feat/attendance-chat-attachments-20261011]
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'src/**'
+      - 'supabase/migrations/**'
+      - 'styles.css'
+      - 'package.json'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:attendance
+      - run: npm test
