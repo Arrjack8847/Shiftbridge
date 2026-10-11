@@ -73,3 +73,199 @@
 .lifecycle-stage.done strong{color:var(--teal2)}
 .lifecycle-stage strong{display:block;font-size:12px;color:var(--muted)}
 .lifecycle-stage small{display:block;font-size:11px;color:var(--muted);margin-top:2px}
+
+
+/* ════════════════════════════════════════════════════════════════
+   Responsive dashboard + subtle interactions
+   Kept dependency-free and isolated from the agent/backend.
+   Route animation is opt-in via .route-enter (src/app.js) so a
+   2-second SSE/poll refresh never replays the entire animation.
+   ════════════════════════════════════════════════════════════════ */
+
+:root{
+  --motion-fast:160ms;
+  --motion-base:260ms;
+  --motion-ease:cubic-bezier(.2,.75,.3,1);
+}
+html{min-width:280px}
+body{overflow-x:hidden}
+#app,.app-frame,.content-wrap,.app-main{min-width:0}
+button,.btn,.icon-btn,.tab,.nav-button,.nav-chat,.side-link{ -webkit-tap-highlight-color:transparent }
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
+  outline:3px solid #19ad99;
+  outline-offset:3px;
+}
+button:disabled{transform:none!important;box-shadow:none!important}
+.content-wrap{min-width:0}
+.desktop-header .search{min-width:0}
+.desktop-header .search span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-meta{min-width:0;flex-shrink:0}
+.side{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#456571 transparent}
+.workspace-side .grow{min-width:0}
+.workspace-side strong,.workspace-side small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app-main{min-height:0}
+.surface-page{min-width:0;min-height:0;overflow-x:hidden;overscroll-behavior-y:contain}
+.chat-shell,.chat-chat,.composer-wrap,.composer{min-width:0}
+.chat-chat{overscroll-behavior-y:contain}
+.message,.message-body{min-width:0}
+.message-body{max-width:min(480px,100%);position:relative;overflow-wrap:anywhere}
+.message-body p,.proposal-evidence li,.proposal-summary{overflow-wrap:anywhere}
+.composer input{font-size:16px} /* prevents iOS zoom when focusing the composer */
+.card,.metric,.task-card,.manage-tile,.proposal-card,.soft-panel,.alert-panel{min-width:0}
+.card,.metric,.proposal-card{overflow-wrap:anywhere}
+.page-heading>div{min-width:0}
+.page-heading h1{overflow-wrap:anywhere}
+.tab-row{overflow-x:auto;scrollbar-width:none}
+.tab-row::-webkit-scrollbar{display:none}
+.link-card{min-width:0;flex-wrap:wrap}
+.link-card code{max-width:100%;overflow-wrap:anywhere}
+.dialog-backdrop{overflow-y:auto;overscroll-behavior:contain}
+.dialog{max-height:calc(100dvh - 40px);overflow-y:auto;overscroll-behavior:contain}
+.workspace-menu{max-height:min(70dvh,560px);overflow-y:auto}
+.notification{width:max-content;max-width:calc(100vw - 32px);bottom:max(24px,env(safe-area-inset-bottom));animation:sb-toast-in .24s var(--motion-ease) both}
+.toggle{justify-content:flex-start}
+.toggle.on{justify-content:flex-start}
+.toggle i{transition:transform var(--motion-fast) var(--motion-ease)}
+.toggle.on i{transform:translateX(18px)}
+.btn,.icon-btn,.task-card,.manage-tile,.side-link,.nav-chat-circle,.tab,.identity-option{
+  transition:background-color var(--motion-fast) ease,border-color var(--motion-fast) ease,
+             box-shadow var(--motion-base) var(--motion-ease),transform var(--motion-base) var(--motion-ease),color var(--motion-fast) ease;
+}
+.btn:active:not(:disabled),.icon-btn:active:not(:disabled),.nav-chat:active .nav-chat-circle,
+.task-card:active,.manage-tile:active{transform:scale(.975)}
+.side-link.active{box-shadow:inset 3px 0 0 #75e3ca;background:linear-gradient(90deg,#1b6156,#1b504b)}
+.tab.active{box-shadow:0 3px 12px #0c403018}
+.composer:focus-within{border-color:#7ac8b9;box-shadow:0 0 0 3px #11a89017,0 4px 14px #0e55401a;transition:box-shadow var(--motion-fast),border-color var(--motion-fast)}
+.composer .send-button{transition:transform var(--motion-fast),background-color var(--motion-fast),box-shadow var(--motion-fast)}
+.composer .send-button:active:not(:disabled){transform:scale(.89)}
+.message-body{transition:box-shadow var(--motion-fast)}
+.dialog-backdrop{animation:sb-backdrop-in .22s ease both}
+.dialog{animation:sb-dialog-in .3s var(--motion-ease) both}
+.identity-card{animation:sb-dialog-in .4s var(--motion-ease) both}
+
+/* Only animate when the user actually changes route/workspace. */
+.route-enter .surface-page,.route-enter .chat-shell{animation:sb-page-in .28s var(--motion-ease) both}
+.route-enter .surface-page .page-heading{animation:sb-item-in .35s var(--motion-ease) .04s both}
+.route-enter .metric,.route-enter .task-card,.route-enter .manage-tile,
+.route-enter .proposal-card,.route-enter .pinned-notice{
+  animation:sb-item-in .38s var(--motion-ease) both;
+}
+.route-enter .metric:nth-child(2),.route-enter .task-card:nth-child(2),.route-enter .manage-tile:nth-child(2){animation-delay:45ms}
+.route-enter .metric:nth-child(3),.route-enter .task-card:nth-child(3),.route-enter .manage-tile:nth-child(3){animation-delay:80ms}
+.route-enter .metric:nth-child(4),.route-enter .task-card:nth-child(4),.route-enter .manage-tile:nth-child(4){animation-delay:110ms}
+.route-enter .metric:nth-child(n+5),.route-enter .manage-tile:nth-child(n+5){animation-delay:130ms}
+
+@keyframes sb-page-in{
+  from{opacity:.55;transform:translateY(7px)}
+  to{opacity:1;transform:translateY(0)}
+}
+@keyframes sb-item-in{
+  from{opacity:.45;transform:translateY(10px)}
+  to{opacity:1;transform:translateY(0)}
+}
+@keyframes sb-dialog-in{
+  from{opacity:0;transform:translateY(14px) scale(.985)}
+  to{opacity:1;transform:translateY(0) scale(1)}
+}
+@keyframes sb-backdrop-in{
+  from{opacity:0}
+  to{opacity:1}
+}
+@keyframes sb-toast-in{
+  from{opacity:0;transform:translate(-50%,9px)}
+  to{opacity:1;transform:translate(-50%,0)}
+}
+
+@media(hover:hover) and (pointer:fine){
+  .btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 7px 16px #087e7022}
+  .task-card:hover,.manage-tile:hover{transform:translateY(-3px);box-shadow:0 12px 26px #102c3910}
+  .metric:hover{box-shadow:0 8px 20px #102c3910}
+  .icon-btn:hover:not(:disabled){transform:translateY(-1px)}
+  .side-link:hover:not(.active){transform:translateX(2px)}
+}
+@media(pointer:coarse){
+  /* The existing flag-action button was invisible without hover. */
+  .msg-dots-btn{opacity:1;min-width:36px;min-height:36px;display:inline-flex;align-items:center;justify-content:center}
+  .btn,.icon-btn,.tab,.workspace-option,.side-link{touch-action:manipulation}
+}
+
+@media(min-width:1200px){
+  .surface-page{padding:38px 42px}
+  .task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(min-width:701px) and (max-width:820px){
+  .side{width:180px;padding-inline:9px}
+  .brand{font-size:20px;letter-spacing:-.9px;padding-inline:5px}
+  .brand img{width:30px;height:30px}
+  .workspace-side{padding:11px 8px}
+  .side-link{gap:9px;padding:11px 9px}
+  .workspace-menu{left:190px}
+  .desktop-header{padding:0 15px}
+  .desktop-header .top-meta>.icon-btn{max-width:160px;overflow:hidden}
+  .surface-page{padding:24px}
+  .task-grid{grid-template-columns:1fr}
+}
+@media(max-width:700px){
+  /* Fit short phones: old min-height:560px made content unreachable. */
+  .app-frame{height:100dvh;overflow:hidden}
+  .content-wrap{height:100dvh;min-height:0;overflow:hidden}
+  .app-main{flex:1;min-height:0;height:auto;overflow:hidden}
+  .mobile-header{flex-shrink:0;padding-inline:clamp(10px,3vw,17px)}
+  .mobile-header .workspace-open{min-width:0}
+  .mobile-header .workspace-open strong{display:block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobile-header .manage-link{flex-shrink:0;white-space:nowrap}
+  .bottom-nav{height:calc(72px + env(safe-area-inset-bottom));padding-bottom:max(7px,env(safe-area-inset-bottom))}
+  .nav-chat-circle{transition:transform var(--motion-base) var(--motion-ease),box-shadow var(--motion-base) var(--motion-ease),background-color var(--motion-fast)}
+  .nav-chat.active .nav-chat-circle{box-shadow:0 5px 20px #087e7052}
+  .surface-page{height:auto;flex:1;min-height:0;min-width:0;overflow-y:auto;scrollbar-gutter:auto;
+    padding:clamp(16px,4vw,24px) clamp(12px,4vw,20px) max(26px,env(safe-area-inset-bottom))}
+  .chat-shell{min-height:0;flex:1;height:auto;overflow:hidden}
+  .chat-chat{min-height:0;padding:15px 12px 17px}
+  .chat-chat .message{max-width:96%;min-width:0}
+  .message-body{max-width:min(76vw,440px);min-width:0}
+  .composer-wrap{padding:9px 10px 10px}
+  .composer{min-width:0}
+  .notice-chat{line-height:1.35}
+  .page-heading{flex-wrap:wrap;align-items:flex-start}
+  .page-heading>div{flex:1 1 180px}
+  .page-heading h1{font-size:clamp(21px,5.4vw,26px)}
+  .metric-grid,.ai-monitor-card .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .metric{padding:13px;min-width:0}
+  .metric b{font-size:clamp(20px,6vw,25px);overflow-wrap:anywhere}
+  .manage-list{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .manage-tile{min-width:0}
+  .proposal-actions{flex-wrap:wrap}
+  .proposal-actions .btn{flex:1 1 120px}
+  .tab{min-width:0}
+  .workspace-menu{position:fixed;top:68px;left:10px;right:10px;width:auto;z-index:80}
+  .dialog-backdrop{padding:12px}
+  .dialog{width:min(100%,475px);max-height:calc(100dvh - 24px);padding:clamp(16px,5vw,24px)}
+  .notification{bottom:calc(80px + env(safe-area-inset-bottom))}
+  .lifecycle-stage{flex:1 1 44%;min-width:0}
+  .link-card code{font-size:clamp(17px,5vw,24px)}
+}
+@media(max-width:400px){
+  .mobile-header{gap:6px}
+  .mobile-header .manage-link{font-size:11px;padding:8px}
+  .mobile-header .workspace-open strong{font-size:13px}
+  .chat-chat{padding-inline:8px}
+  .chat-chat .message{gap:6px}
+  .message-body{max-width:76vw}
+  .proposal-card{padding:14px}
+  .identity-card{padding:24px 16px}
+  .tab{font-size:10px;padding:9px 4px}
+  .tab .badge{padding:3px 5px}
+}
+@media(max-width:340px){
+  .manage-list{grid-template-columns:1fr}
+  .metric-grid,.ai-monitor-card .metric-grid{grid-template-columns:1fr 1fr}
+  .mobile-header .manage-link{padding:7px}
+  .bottom-nav{padding-inline:9px}
+  #handover-form>.row{flex-wrap:wrap}
+  #handover-form>.row>.btn{flex:1 1 100%}
+}
+@media(prefers-reduced-motion:reduce){
+  html:focus-within{scroll-behavior:auto!important}
+  .route-enter *,.route-enter,.notification,.dialog,.dialog-backdrop,.identity-card,
+  .toggle i{animation:none!important;transition:none!important}
+}

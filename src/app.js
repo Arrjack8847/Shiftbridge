@@ -56,6 +56,7 @@ let flagMsgId = null;       // message being flagged as issue
 let pendingAnnouncementDraft = null; // AI-suggested draft for compose dialog
 let pendingAnnouncementId = null; // announcement being edited
 let lastRoute = '';
+let lastRenderedWorkspace = '';
 
 const app = document.querySelector('#app');
 const $ = (s) => document.querySelector(s);
@@ -66,7 +67,13 @@ const route = () => decodeURIComponent(location.hash.replace(/^#\/?/, '').split(
 const admin = () => identity?.role === 'admin';
 
 // ── Navigation & rendering helpers (unchanged from original) ──────
-function nav(path) { location.hash = '/' + path; if (route() === path) render(); }
+function nav(path) {
+  // A changed hash is rendered by the hashchange listener exactly once.
+  // Rendering immediately as well would cancel the entrance animation.
+  const target = '#/' + path;
+  if (location.hash === target) render();
+  else location.hash = '/' + path;
+}
 function badge(label, tone = '') { return `<span class="badge ${tone}">${e(label)}</span>`; }
 function personAvatar(id, big = false) { const p = member(id); return `<span class="avatar ${p.hue} ${big ? 'big' : ''}" aria-label="${e(p.name)}">${e(p.initials)}</span>`; }
 function alertCount() { return wsItems(data.issues).filter((i) => i.status !== 'resolved').length + wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length; }
@@ -337,10 +344,34 @@ function render() {
     else if (path === 'workspace/rules') view = rulesScreen(true);
     else view = notFound();
 
-    app.innerHTML = `<div class="app-frame">${sideBar(path)}<div class="content-wrap">${desktopHead()}${mobileHeader(path)}<main class="app-main">${view}</main>${bottomNav(path)}</div></div>${workspaceMenu()}${popup()}${toast ? `<div class="notification" role="status">${e(toast)}</div>` : ''}`;
+    // Preserve a draft and reading position on SSE/poll-driven refreshes.
+    // A real page or workspace switch resets this state and animates once.
+    const viewChanged = lastRoute !== path || lastRenderedWorkspace !== currentWorkspace;
+    const oldLog = !viewChanged && path === 'chat' ? $('#chatMessages') : null;
+    const wasNearBottom = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 96;
+    const oldScrollTop = oldLog?.scrollTop || 0;
+    const oldComposer = !viewChanged && path === 'chat' ? $('#send-message input[name="message"]') : null;
+    const draft = oldComposer?.value || '';
+    const composerFocused = !!oldComposer && document.activeElement === oldComposer;
+    const caretStart = composerFocused ? oldComposer.selectionStart : null;
+    const caretEnd = composerFocused ? oldComposer.selectionEnd : null;
 
-    if (path === 'chat') { const logs = $('#chatMessages'); if (logs) logs.scrollTop = logs.scrollHeight; }
-    if (lastRoute !== path) lastRoute = path;
+    app.innerHTML = `<div class="app-frame${viewChanged ? ' route-enter' : ''}">${sideBar(path)}<div class="content-wrap">${desktopHead()}${mobileHeader(path)}<main class="app-main">${view}</main>${bottomNav(path)}</div></div>${workspaceMenu()}${popup()}${toast ? `<div class="notification" role="status">${e(toast)}</div>` : ''}`;
+
+    if (path === 'chat') {
+      const logs = $('#chatMessages');
+      if (logs) logs.scrollTop = wasNearBottom ? logs.scrollHeight : oldScrollTop;
+      const nextComposer = $('#send-message input[name="message"]');
+      if (nextComposer && oldComposer) {
+        nextComposer.value = draft;
+        if (composerFocused) {
+          nextComposer.focus({ preventScroll: true });
+          if (caretStart !== null && caretEnd !== null) nextComposer.setSelectionRange(caretStart, caretEnd);
+        }
+      }
+    }
+    lastRoute = path;
+    lastRenderedWorkspace = currentWorkspace;
   } catch (renderErr) {
     console.error('Render error:', renderErr);
     app.innerHTML = `<div class="identity-screen"><div class="identity-card"><h1>Something went wrong</h1><p>${e(renderErr.message)}</p><button class="btn full" data-action="switch-identity">Back to identity selector</button><p class="footer-note" style="margin-top:12px">Try refreshing the page, or reset demo data from the identity screen.</p></div></div>`;
@@ -668,6 +699,8 @@ app.addEventListener('submit', async (event) => {
     const msg = { id: msgId, ws: currentWorkspace, user: identity.userId, body: body.slice(0, 1500), at: Date.now() };
     // Optimistic update.
     data.messages.push(msg);
+    // Clear the submitted text before the refresh snapshot so it cannot reappear.
+    form.elements.namedItem('message').value = '';
     render();
     document.querySelector('#send-message input[name="message"]')?.focus();
     try {
