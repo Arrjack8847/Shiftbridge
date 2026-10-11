@@ -12,6 +12,7 @@
 
 import express from 'express';
 import cors from 'cors';
+import { classifyIncomingMessage } from './message-intent.js';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
@@ -290,6 +291,44 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   });
 });
 
+
+// ── Zero-model latency path: report explicit operational warnings ──
+// A report is an unverified employee claim, NOT confirmation of damage/safety.
+function recordAutoWarning(workspaceId, messageId, senderId, body, intent) {
+  const d = getDB();
+  const member = d.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND person_id = ?')
+    .get(workspaceId, senderId);
+  if (!member) return null; // Never attribute a detected report to a non-member.
+
+  const existing = d.prepare('SELECT id FROM issues WHERE workspace_id = ? AND source = ?')
+    .get(workspaceId, messageId);
+  if (existing) return existing.id;
+
+  const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const title = `Possible ${intent.issueType} issue: ${body.replace(/\\s+/g, ' ').slice(0, 130)}`;
+  const ts = Date.now();
+  const result = d.prepare(
+    `INSERT OR IGNORE INTO issues
+      (id, workspace_id, title, description, severity, status, source, created_by,
+       reporter_id, requires_approval, approved, evidence, issue_type, created_at)
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, 'auto-warning-detector', ?, ?, 0, ?, ?, ?)`
+  ).run(issueId, workspaceId, title.slice(0, 200), body, intent.severity,
+    messageId, senderId, intent.issueType === 'safety' ? 1 : 0,
+    'Unverified report from chat message; human inspection/confirmation required.',
+    intent.issueType, ts);
+
+  if (!result.changes) return d.prepare('SELECT id FROM issues WHERE workspace_id = ? AND source = ?')
+    .get(workspaceId, messageId)?.id || null;
+
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(`al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      workspaceId, 'issue_auto_reported', 'issue', issueId, 'warning-detector',
+      `Unverified warning from message ${messageId}, sent by ${senderId}; requires human review`, ts);
+  bumpRevision();
+  notifySSE(workspaceId, { type: 'issue', action: 'reported', id: issueId, messageId });
+  return issueId;
+}
+
 /** POST /api/workspaces/:workspace/messages — create a message (idempotent by client ID). */
 app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => {
   const { id, user, body } = req.body;
@@ -313,14 +352,25 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
     bumpRevision();
     notifySSE(req.workspaceId, { type: 'message', id: msgId, user, body: text.slice(0, 1500), at: ts });
 
-    // ── AI Processing: fire async (non-blocking) ───────────────────
-    // The response is sent immediately — chat is never blocked.
-    // dispatchProcessMessage selects tencent-agent or groq-agent
-    // based on AI_PROVIDER env var (default: tencent-local).
-    // The agent fetches context, triggers the AI, executes actions
-    // via MCP tools (Tencent) or JSON API (Groq), and SSE pushes
-    // updates to all clients when done.
-    setImmediate(() => {
+    // Route obvious fault reports in milliseconds; avoid launching the full
+    // CodeBuddy CLI for simple warnings and low-value acknowledgments.
+    // Other language (including questions/ambiguous problems) goes to AI.
+    const intent = AI_PROVIDER === 'tencent-local'
+      ? classifyIncomingMessage(text.slice(0, 1500))
+      : { route: 'ai' };
+    if (intent.route === 'issue') {
+      try {
+        const issueId = recordAutoWarning(req.workspaceId, msgId, user, text.slice(0, 1500), intent);
+        if (issueId) console.log(`[fast-warning] Reported unverified issue ${issueId} from ${msgId}`);
+      } catch (err) {
+        // Never lose the chat message due to warning classification failures.
+        console.error('[fast-warning] Failed to record warning:', err.message);
+      }
+    }
+
+    // The chat response is immediate; complex tasks and ambiguous messages
+    // still receive Tencent semantic analysis in a non-blocking callback.
+    if (intent.route === 'ai' || (intent.route === 'issue' && intent.needsAi)) setImmediate(() => {
       dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
         .then(result => {
           if (result.ok) {
