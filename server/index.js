@@ -772,7 +772,9 @@ app.put('/api/issues/:id', (req, res) => {
   const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'issue not found' });
 
-  const allowed = ['status', 'evidence', 'approved', 'severity', 'title', 'description'];
+  // Approval decisions must use the audited manager review endpoint.
+  if (req.body.approved !== undefined) return res.status(403).json({ error: 'Use the manager attention review endpoint for approval decisions' });
+  const allowed = ['status', 'evidence', 'severity', 'title', 'description'];
   const updates = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) {
@@ -2541,6 +2543,9 @@ app.put('/api/issues/:id/resolve', (req, res) => {
   const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(id);
   if (!row) return res.status(404).json({ error: 'issue not found' });
   if (row.status === 'resolved') return res.status(400).json({ error: 'issue is already resolved' });
+  if (!resolvedBy || resolvedBy !== getWorkspaceManager(d, row.workspace_id)) {
+    return res.status(403).json({ error: 'Only the workspace demo manager can authorize issue resolution' });
+  }
 
   if (!qualifiedVerifier) return res.status(400).json({ error: 'qualifiedVerifier is required' });
   if (!verificationEvidence) return res.status(400).json({ error: 'verificationEvidence is required' });
