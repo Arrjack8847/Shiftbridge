@@ -32,10 +32,12 @@ let data = {
   messages: [],
   tasks: [],
   issues: [],
+  agentFeedback: [],
   proposals: [],
   completionClaims: [],
   announcements: [],
   aiStatus: null,
+  groqStatus: null,
   shifts: {},
   handovers: {},
 };
@@ -68,7 +70,7 @@ const admin = () => identity?.role === 'admin';
 function nav(path) { location.hash = '/' + path; if (route() === path) render(); }
 function badge(label, tone = '') { return `<span class="badge ${tone}">${e(label)}</span>`; }
 function personAvatar(id, big = false) { const p = member(id); return `<span class="avatar ${p.hue} ${big ? 'big' : ''}" aria-label="${e(p.name)}">${e(p.initials)}</span>`; }
-function alertCount() { return wsItems(data.issues).filter((i) => i.status === 'open').length + wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length; }
+function alertCount() { return wsItems(data.issues).filter((i) => i.status !== 'resolved').length + wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length; }
 function myTaskCount() { return wsItems(data.tasks).filter((t) => t.assignee === identity?.userId && ['todo', 'doing'].includes(t.status)).length; }
 function navLink(path, title, ic, active) { const count = title === 'Tasks' ? myTaskCount() : title === 'Manage' ? alertCount() : 0; return `<button class="side-link ${active ? 'active' : ''}" data-nav="${path}">${icon(ic)}<span>${title}</span>${count ? `<span class="count">${count}</span>` : ''}</button>`; }
 function sideBar(path) { return `<aside class="side" aria-label="Desktop navigation"><div class="brand"><img src="./assets/mark.svg" alt=""/>Shift<b>Bridge</b></div><button class="workspace-side" data-action="workspace-menu">${icon('coffee')}<span class="grow"><strong>${e(workspace()?.name || '')}</strong><small>${e(workspace()?.type || '')}</small></span>${icon('down', 15)}</button>${navLink('chat', 'Chat', 'chat', path === 'chat')}${navLink('tasks', 'Tasks', 'tasks', path === 'tasks' || path.startsWith('task/'))}${navLink('shift', 'Shift', 'clock', path === 'shift' || path === 'handover')}${admin() ? navLink('manage', 'Manage', 'manage', path.startsWith('manage') || path.startsWith('workspace')) : ''}<div class="side-spacer"></div><button class="side-link side-profile" data-nav="profile">${personAvatar(identity?.userId)}<span><strong>${e(member(identity?.userId).name)}</strong><br/><small>${admin() ? 'Administrator' : 'Employee'}</small></span></button></aside>`; }
@@ -137,16 +139,25 @@ function manageHome() {
   const pendingProposals = wsItems(data.proposals).filter((p) => p.status === 'pending');
   const activeAnnouncements = wsItems(data.announcements).filter((a) => a.status === 'published' && !a.archivedAt);
   const ai = data.aiStatus;
+  const groq = data.groqStatus;
   const aiLatest = ai?.latest;
   const aiAgg = ai?.aggregates;
   const aiStalled = ai?.stalled;
   const aiLastRun = aiLatest?.runAt ? displayTime(aiLatest.runAt) : 'Never';
   const aiCard = ai ? `<div class="card ai-monitor-card"><div class="row between"><div class="eyebrow">${icon('spark', 16)} SILENT AI MONITORING</div>${aiStalled ? badge('STALLED', 'red') : aiLatest ? badge('ACTIVE', '') : badge('NOT RUN', 'gray')}</div><div class="metric-grid" style="margin-top:12px"><div class="metric"><small>Last analysis</small><b style="font-size:13px">${e(aiLastRun)}</b></div><div class="metric"><small>Messages analyzed</small><b>${aiAgg?.totalMessagesAnalyzed || 0}</b></div><div class="metric"><small>Proposals created</small><b>${aiAgg?.totalProposalsCreated || 0}</b></div><div class="metric"><small>Completion claims</small><b>${aiAgg?.totalCompletionClaims || 0}</b></div></div>${aiLatest?.errors ? `<div class="alert-panel" style="margin-top:10px;padding:8px 12px;font-size:13px">${icon('alert', 14)} ${e(aiLatest.errors.slice(0, 150))}</div>` : ''}${aiLatest?.summary ? `<p class="small muted" style="margin-top:8px">${e(aiLatest.summary.slice(0, 200))}</p>` : ''}<p class="small muted" style="margin-top:8px">Scheduled hourly. The AI reads messages, proposes tasks, and processes completion claims — never posts to chat.</p></div>` : '';
-  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status === 'open').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div><div class="metric"><small>Active announcements</small><b>${activeAnnouncements.length}</b>${badge(activeAnnouncements.length ? 'Published' : 'None', activeAnnouncements.length ? '' : 'gray')}</div></div>${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
+  const groqCard = '<div class="card ai-monitor-card">' +
+    '<div class="row between"><strong>Groq AI Agent V2</strong>' +
+    (groq?.enabled ? badge('CONNECTED') : badge('API KEY NEEDED','amber')) + '</div>' +
+    '<p class="muted small">Model: ' + e(groq?.model || 'not configured') +
+    ' · Completed: ' + (groq?.completed || 0) +
+    ' · Pending: ' + (groq?.pending || 0) +
+    ' · Failed: ' + (groq?.failed || 0) + '</p>' +
+    '<p class="small muted">Runs silently after ambiguous chat messages. Simple warnings and routine assignments use the fast route.</p></div>';
+  return `<section class="surface-page">${pageHeading('Manage', 'Keep your team running smoothly', badge(`${alertCount()} need attention`, alertCount() ? 'amber' : ''))}<div class="metric-grid"><div class="metric"><small>Active tasks</small><b>${wsItems(data.tasks).filter((t) => ['todo', 'doing'].includes(t.status)).length}</b>${badge('In progress', 'blue')}</div><div class="metric"><small>Open issues</small><b>${wsItems(data.issues).filter((i) => i.status !== 'resolved').length}</b>${badge('Needs follow-up', 'amber')}</div><div class="metric"><small>Awaiting review</small><b>${wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status)).length}</b>${badge('Human review', 'red')}</div><div class="metric"><small>AI proposals</small><b>${pendingProposals.length}</b>${badge(pendingProposals.length ? 'Pending' : 'All clear', pendingProposals.length ? 'amber' : '')}</div><div class="metric"><small>Active announcements</small><b>${activeAnnouncements.length}</b>${badge(activeAnnouncements.length ? 'Published' : 'None', activeAnnouncements.length ? '' : 'gray')}</div></div>${groqCard}${aiCard}${pendingProposals.length > 0 ? `<h2 class="section-title">Silent AI Proposals</h2><div class="proposals-section">${pendingProposals.map(proposalCard).join('')}<button class="text-btn" data-nav="manage/proposals">View all proposals ${icon('chevron', 15)}</button></div>` : ''}<h2 class="section-title">Business tools</h2><div class="manage-list">${managePages.map(([id, title, ic, sub]) => `<button class="manage-tile" data-nav="manage/${id}"><span class="tile-icon ${id === 'attention' ? 'red' : ''}">${icon(ic, 20)}</span><strong>${e(title)}</strong><p>${e(sub)}</p>${id === 'proposals' && pendingProposals.length ? `<span class="count">${pendingProposals.length}</span>` : ''}</button>`).join('')}</div><p class="footer-note">The Silent AI agent monitors workspace activity and creates proposals for task creation, completion review, and protected work refusals. Managers review all proposals before any action is taken.</p></section>`;
 }
 
 function attentionScreen() {
-  const open = wsItems(data.issues).filter((i) => i.status === 'open');
+  const open = wsItems(data.issues).filter((i) => i.status !== 'resolved');
   const pending = wsItems(data.tasks).filter((t) => ['review', 'blocked'].includes(t.status));
   return `<section class="surface-page"><button class="section-back" data-nav="manage">${icon('back', 17)} Manage</button>${pageHeading('Needs Attention', 'Only items that need a decision', badge(`${open.length + pending.length} pending`, 'amber'))}<h2 class="section-title">Open issues</h2><div class="stack">${open.length ? open.map((i) => `<button class="card list-row" data-nav="manage/issue/${e(i.id)}"><span class="avatar ${i.issueType === 'safety' ? 'red' : 'rose'}">${icon('alert')}</span><span class="grow"><strong>${e(i.title)}</strong><p>${e(i.description)}</p>${i.reporterId ? `<small class="muted">Reported by ${e(member(i.reporterId).name)}</small>` : ''}${i.issueType ? `<span class="badge blue" style="margin-left:6px">${e(i.issueType)}</span>` : ''}</span>${icon('chevron')}</button>`).join('') : empty('No open issues', 'Serious problems will appear here.')}</div><h2 class="section-title">Awaiting review</h2><div class="stack">${pending.length ? pending.map((t) => `<button class="card list-row" data-nav="task/${e(t.id)}"><span class="avatar orange">${icon('shield')}</span><span class="grow"><strong>${e(t.name)}</strong><p>Verification required · ${e(t.due)}</p></span>${icon('chevron')}</button>`).join('') : empty('Nothing to review', 'No approvals are pending right now.')}</div></section>`;
 }
@@ -212,15 +223,32 @@ function issueScreen(id) {
   const i = data.issues.find((x) => x.id === id && x.ws === currentWorkspace);
   if (!i) return notFound();
   const source = data.messages.find((m) => m.id === i.source);
+  const recentLinkedMessages = (i.linkedMessages || []).slice(-12);
+  const issueTimeline = '<div class="card"><div class="card-title">Incident conversation (' + recentLinkedMessages.length + ')</div>' +
+    (recentLinkedMessages.length ? recentLinkedMessages.map(m =>
+      '<div class="soft-panel" style="margin-bottom:8px">' +
+      '<small>' + e(member(m.user).name) + ' · ' + displayTime(m.at) + ' · ' + e(m.relation || 'report') + '</small>' +
+      '<p class="readable">' + e(m.body) + '</p>' +
+      (admin() && m.id !== i.source ? '<div class="row" style="flex-wrap:wrap;gap:6px">' +
+        '<button class="btn outline" data-action="feedback-link-correct" data-id="' + e(i.id) + '" data-message-id="' + e(m.id) + '">Correct link</button>' +
+        '<button class="btn outline" data-action="feedback-link-wrong" data-id="' + e(i.id) + '" data-message-id="' + e(m.id) + '">Wrong link</button></div>' : '') +
+      '</div>').join('') :
+      '<p class="muted">No linked messages yet.</p>') + '</div>';
+  const lastFeedback = (data.agentFeedback || []).find(f => f.issueId === i.id);
+  const feedbackCard = admin() && i.source
+    ? '<div class="card"><div class="card-title">Teach Silent AI</div><p class="small muted">Was this detected incident report correct? Feedback is saved for evaluation; it does not retrain Tencent automatically.</p>' +
+      (lastFeedback ? '<p class="muted small">Last review: ' + e(lastFeedback.verdict) + '</p>' : '') +
+      '<div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn outline" data-action="feedback-correct" data-id="' + e(i.id) + '">Correct report</button>' +
+      '<button class="btn outline" data-action="feedback-false" data-id="' + e(i.id) + '">False alarm</button></div></div>' : '';
   const linkedAnn = i.linkedAnnouncementId ? data.announcements.find((a) => a.id === i.linkedAnnouncementId) : null;
   const stages = [
     { key: 'reported', label: 'Reported', done: true, detail: i.reporterId ? `By ${member(i.reporterId).name}` : 'Detected by AI' },
-    { key: 'acknowledged', label: 'Acknowledged', done: i.status !== 'open' || i.approved, detail: i.approved ? 'Manager acknowledged' : 'Pending' },
+    { key: 'acknowledged', label: 'Acknowledged', done: i.approved || ['acknowledged','in_progress','resolved'].includes(i.status), detail: i.approved ? 'Manager acknowledged' : 'Pending' },
     { key: 'in_progress', label: 'Action in progress', done: ['in_progress', 'resolved'].includes(i.status), detail: '' },
     { key: 'qualified_verification', label: 'Qualified verification', done: i.status === 'resolved' && !!i.qualifiedVerifier, detail: i.qualifiedVerifier ? `By ${member(i.qualifiedVerifier).name}` : 'Required' },
     { key: 'resolved', label: 'Resolved', done: i.status === 'resolved', detail: i.verifiedAt ? displayTime(i.verifiedAt) : '' },
   ];
-  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status === 'open' ? 'red' : ''))}<div class="lifecycle-stages">${stages.map((s) => `<div class="lifecycle-stage ${s.done ? 'done' : ''}"><div class="lifecycle-dot ${s.done ? 'done' : ''}">${s.done ? icon('check', 12) : ''}</div><div class="grow"><strong>${e(s.label)}</strong>${s.detail ? `<small class="muted">${e(s.detail)}</small>` : ''}</div></div>`).join('')}</div><div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${i.issueType ? `<div class="soft-panel" style="margin-top:8px"><small>Type: ${e(i.issueType)}</small></div>` : ''}${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}${i.reporterId ? `<div class="row between" style="margin-top:8px"><span class="muted small">Reported by</span><span class="row">${personAvatar(i.reporterId)} ${e(member(i.reporterId).name)}</span></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div>${linkedAnn ? `<div class="card"><div class="card-title">Linked announcement</div><button class="list-row" data-nav="announcement/${encodeURIComponent(linkedAnn.id)}">${icon('megaphone')}<span class="grow"><strong>${e(linkedAnn.title)}</strong><small>${badge(linkedAnn.type.toUpperCase(), linkedAnn.type === 'safety' ? 'red' : 'blue')}</small></span>${icon('chevron', 17)}</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">A repeated equipment issue remains unresolved. Completing the request for an inspection is not proof that the machine is safe.</p></div><div class="card"><div class="card-title">Administrator decision</div>${i.status === 'open' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="approve-inspection" data-id="${e(i.id)}">${icon('shield', 17)} Approve inspection request</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved.${i.qualifiedVerifier ? `<br/><small>Verified by: ${e(member(i.qualifiedVerifier).name)}</small>` : ''}${i.verificationEvidence ? `<br/><small>Evidence: ${e(i.verificationEvidence)}</small>` : ''}${i.evidence ? `<br/><small>Notes: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
+  return `<section class="surface-page"><button class="section-back" data-nav="manage/attention">${icon('back', 17)} Needs Attention</button>${pageHeading(i.title, 'Issue ' + i.id.toUpperCase(), badge(i.status.toUpperCase(), i.status !== 'resolved' ? 'red' : ''))}<div class="lifecycle-stages">${stages.map((s) => `<div class="lifecycle-stage ${s.done ? 'done' : ''}"><div class="lifecycle-dot ${s.done ? 'done' : ''}">${s.done ? icon('check', 12) : ''}</div><div class="grow"><strong>${e(s.label)}</strong>${s.detail ? `<small class="muted">${e(s.detail)}</small>` : ''}</div></div>`).join('')}</div><div class="two-col"><div class="stack"><div class="card"><div class="card-title">What was reported</div><p class="readable">${e(i.description)}</p>${i.issueType ? `<div class="soft-panel" style="margin-top:8px"><small>Type: ${e(i.issueType)}</small></div>` : ''}${source ? `<div class="soft-panel">"${e(source.body)}"<br/><small>— ${e(member(source.user).name)}</small></div>` : ''}${i.reporterId ? `<div class="row between" style="margin-top:8px"><span class="muted small">Reported by</span><span class="row">${personAvatar(i.reporterId)} ${e(member(i.reporterId).name)}</span></div>` : ''}<button class="text-btn pad-top" data-nav="chat">${icon('chat', 16)} See team chat</button></div>${issueTimeline}${linkedAnn ? `<div class="card"><div class="card-title">Linked announcement</div><button class="list-row" data-nav="announcement/${encodeURIComponent(linkedAnn.id)}">${icon('megaphone')}<span class="grow"><strong>${e(linkedAnn.title)}</strong><small>${badge(linkedAnn.type.toUpperCase(), linkedAnn.type === 'safety' ? 'red' : 'blue')}</small></span>${icon('chevron', 17)}</button></div>` : ''}</div><div class="stack"><div class="card"><div class="card-title">Why attention is needed</div><p class="muted readable">The report remains unverified. Follow-up messages, scheduled inspections and employee completion claims do not prove that equipment is safe or a fault is resolved.</p></div>${feedbackCard}<div class="card"><div class="card-title">Administrator decision</div>${i.status !== 'resolved' ? `<div class="alert-panel">Qualified inspection, safe-to-use confirmation and human authorization are required before closure.</div><button class="btn full pad-top" data-action="approve-inspection" data-id="${e(i.id)}">${icon('shield', 17)} Approve inspection request</button><button class="btn outline full" style="margin-top:10px" data-action="issue-resolve" data-id="${e(i.id)}">Record verified resolution</button>` : `<div class="soft-panel">This issue was recorded as resolved.${i.qualifiedVerifier ? `<br/><small>Verified by: ${e(member(i.qualifiedVerifier).name)}</small>` : ''}${i.verificationEvidence ? `<br/><small>Evidence: ${e(i.verificationEvidence)}</small>` : ''}${i.evidence ? `<br/><small>Notes: ${e(i.evidence)}</small>` : ''}</div>`}</div></div></div></section>`;
 }
 
 function createWorkspaceScreen() {
@@ -511,6 +539,29 @@ app.addEventListener('click', async (event) => {
     return;
   }
 
+  // ── Agent V2: manager evaluates a detected incident ───────────────
+  if (['feedback-correct','feedback-false','feedback-link-correct','feedback-link-wrong'].includes(action)) {
+    if (!admin()) return notify('Only the manager can review AI detections.');
+    const issue = data.issues.find(item => item.id === id && item.ws === currentWorkspace);
+    const messageId = action.startsWith('feedback-link-') ? el.dataset.messageId : issue?.source;
+    if (!messageId) return notify('Issue has no verified source message.');
+    const verdict = action === 'feedback-correct' ? 'correct_issue'
+      : action === 'feedback-false' ? 'false_alarm'
+      : action === 'feedback-link-correct' ? 'correct_link' : 'wrong_link';
+    try {
+      await api.submitAgentFeedback(currentWorkspace, {
+        reviewerId:identity.userId,issueId:id,messageId,
+        verdict,
+        note:action.startsWith('feedback-link-') ? 'Manager reviewed incident-message link'
+          : 'Manager reviewed the original reported issue',
+      });
+      await refreshAgentFeedback();
+      render();
+      notify('AI feedback recorded for future evaluations');
+    } catch (err) { notify('Feedback failed: ' + err.message); }
+    return;
+  }
+
   // ── Approve inspection ───────────────────────────────────────────
   if (action === 'approve-inspection') {
     const i = data.issues.find((x) => x.id === id && x.ws === currentWorkspace);
@@ -726,7 +777,7 @@ app.addEventListener('submit', async (event) => {
     const text = String(fields.proof || '').trim();
     if (!text) return;
     const evidence = String(fields.evidence || '').trim();
-    const i = data.issues.find((x) => x.id === pendingIssueId && x.ws === currentWorkspace && x.status === 'open');
+    const i = data.issues.find((x) => x.id === pendingIssueId && x.ws === currentWorkspace && x.status !== 'resolved');
     if (i) {
       i.status = 'resolved';
       i.evidence = text.slice(0, 1000);
@@ -843,7 +894,7 @@ let sseCleanup = null;
 async function loadAllData() {
   try {
     await refreshWorkspaces();
-    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+    await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
     connectionStatus = 'online';
   } catch (err) {
     connectionStatus = 'offline';
@@ -884,6 +935,16 @@ async function refreshIssues() {
   if (res.revision) serverRevision = res.revision;
 }
 
+async function refreshAgentFeedback() {
+  if (!admin()) { data.agentFeedback = []; return; }
+  try {
+    const result = await api.getAgentFeedback(currentWorkspace, identity.userId);
+    data.agentFeedback = result.feedback || [];
+  } catch (err) {
+    console.error('Could not load AI feedback:', err);
+  }
+}
+
 async function refreshProposals() {
   try {
     const res = await api.getProposals(currentWorkspace);
@@ -905,6 +966,11 @@ async function refreshAIStatus() {
     const res = await api.getAIStatus(currentWorkspace);
     data.aiStatus = res;
   } catch { /* ai-status endpoint may not exist yet */ }
+  try {
+    data.groqStatus = await api.getGroqStatus(currentWorkspace);
+  } catch {
+    data.groqStatus = null;
+  }
 }
 
 async function refreshAnnouncements() {
@@ -930,7 +996,7 @@ async function refreshHandovers() {
 
 async function refreshWorkspaceData() {
   // Called when switching workspaces — refresh all data for the new workspace.
-  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+  await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
   // Reconnect SSE to the new workspace.
   if (sseCleanup) { sseCleanup(); sseCleanup = null; }
   connectSSE();
@@ -942,7 +1008,7 @@ async function fullSync() {
   try {
     const syncRes = await api.sync(currentWorkspace, serverRevision);
     if (syncRes.changed) {
-      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
+      await Promise.all([refreshMessages(), refreshTasks(), refreshIssues(), refreshAgentFeedback(), refreshProposals(), refreshCompletionClaims(), refreshAIStatus(), refreshAnnouncements(), refreshShifts(), refreshHandovers()]);
       // Also refresh workspaces in case a new one was created.
       await refreshWorkspaces();
       render();

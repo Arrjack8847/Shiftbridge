@@ -12,6 +12,8 @@
 
 import express from 'express';
 import cors from 'cors';
+import { classifyIncomingMessage } from './message-intent.js';
+import { normalizeEntityKey, findMatchingOpenIssue, linkMessageToIssue, issueMessages, workspaceIncidentContext } from './incident-memory.js';
 import { resolve, dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
@@ -39,19 +41,16 @@ import { seedDatabase } from './seed.js';
 import { ruleDefaults } from './rule-defaults.js';
 // ── AI Provider Selection ───────────────────────────────────────────
 // AI_PROVIDER controls which AI backend is used:
-//   "tencent-local" (default) → Tencent AI via CodeBuddy serve + MCP tools
-//   "groq"                    → Legacy Groq API (code preserved in git)
-//
-// Groq code is kept in groq-agent.js and git history. When tencent-local
-// is active, groq-agent.js is imported only for backward-compatible status.
+//   "groq" (default)        → Groq hosted API; no CodeBuddy installation needed
+//   "tencent-local"         → optional legacy Tencent CodeBuddy adapter
+// Only one provider processes a chat message; no duplicated AI agents.
 import {
   processMessage as tencentProcessMessage,
   processPendingJobs as tencentProcessPending,
   getTencentStatus,
 } from './tencent-agent.js';
 
-// Legacy Groq agent — only loaded for backward-compatible status endpoint
-// and the AI_PROVIDER=groq fallback path. Active code is tencent-agent.js.
+// Groq API is the active Agent V2 provider; Tencent is legacy opt-in.
 import {
   processMessage as groqProcessMessage,
   processPendingJobs as groqProcessPending,
@@ -59,19 +58,14 @@ import {
 } from './groq-agent.js';
 
 // Provider-agnostic dispatch (Phase D — prevent dual AI systems)
-const AI_PROVIDER = process.env.AI_PROVIDER || 'tencent-local';
+const AI_PROVIDER = process.env.AI_PROVIDER || 'groq';
 function dispatchProcessMessage(workspaceId, messageId, user, body) {
-  if (AI_PROVIDER === 'groq') {
-    // Legacy path — only used when AI_PROVIDER=groq is explicitly set
-    return groqProcessMessage(workspaceId, messageId, user, body);
-  }
-  return tencentProcessMessage(workspaceId, messageId, user, body);
+  return AI_PROVIDER === 'tencent-local'
+    ? tencentProcessMessage(workspaceId, messageId, user, body)
+    : groqProcessMessage(workspaceId, messageId, user, body);
 }
 async function dispatchProcessPending() {
-  if (AI_PROVIDER === 'groq') {
-    return groqProcessPending();
-  }
-  return tencentProcessPending();
+  return AI_PROVIDER === 'tencent-local' ? tencentProcessPending() : groqProcessPending();
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -269,16 +263,20 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   const d = getDB();
   const since = req.query.since ? parseInt(req.query.since, 10) : 0;
   const sinceSeq = req.query.sinceSeq ? parseInt(req.query.sinceSeq, 10) : 0;
-  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 100, 500));
 
-  // Fetch limit+1 rows to determine hasMore without a second query.
-  const rows = d.prepare(
-    'SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? AND seq > ? ORDER BY seq ASC LIMIT ?',
-  ).all(req.workspaceId, since, sinceSeq, limit + 1);
-
+  // latest=1 returns the newest batch in chronological order.
+  // Existing since/sinceSeq pagination remains backward compatible.
+  const latest = req.query.latest === '1' && !since && !sinceSeq;
+  const rows = latest
+    ? d.prepare('SELECT * FROM messages WHERE workspace_id = ? ORDER BY seq DESC LIMIT ?').all(req.workspaceId, limit + 1)
+    : d.prepare('SELECT * FROM messages WHERE workspace_id = ? AND created_at > ? AND seq > ? ORDER BY seq ASC LIMIT ?').all(req.workspaceId, since, sinceSeq, limit + 1);
   const hasMore = rows.length > limit;
-  const messages = (hasMore ? rows.slice(0, limit) : rows).map(mapMessage);
-  const nextSinceSeq = hasMore && messages.length > 0
+  const selected = rows.slice(0, limit);
+  if (latest) selected.reverse();
+  const messages = selected.map(mapMessage);
+  // sinceSeq pages forward; it cannot page backwards into a "latest" slice.
+  const nextSinceSeq = !latest && hasMore && messages.length > 0
     ? messages[messages.length - 1].seq
     : null;
 
@@ -288,6 +286,74 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
     nextSinceSeq,
     revision: currentRevision(),
   });
+});
+
+
+// ── Zero-model latency path: report explicit operational warnings ──
+// A report is an unverified employee claim, NOT confirmation of damage/safety.
+function recordAutoWarning(workspaceId, messageId, senderId, body, intent) {
+  const d = getDB();
+  const member = d.prepare('SELECT 1 FROM workspace_members WHERE workspace_id = ? AND person_id = ?')
+    .get(workspaceId, senderId);
+  if (!member) return null; // Never attribute a detected report to a non-member.
+
+  const existing = d.prepare('SELECT id FROM issues WHERE workspace_id = ? AND source = ?')
+    .get(workspaceId, messageId);
+  if (existing) return existing.id;
+
+  const entityKey = normalizeEntityKey(body);
+  const matched = findMatchingOpenIssue(d, workspaceId, entityKey);
+  if (matched) {
+    const linked = linkMessageToIssue(d, {
+      workspaceId, issueId: matched.id, messageId,
+      relation: 'report', actor: 'fast-warning', reason: 'Exact equipment identifier matched',
+    });
+    if (!linked.ok) throw new Error(linked.error);
+    if (intent.issueType === 'safety') {
+      d.prepare("UPDATE issues SET severity='high',requires_approval=1,issue_type='safety' WHERE id=? AND workspace_id=?")
+        .run(matched.id, workspaceId);
+    }
+    bumpRevision();
+    notifySSE(workspaceId, {type:'issue',action:'linked',id:matched.id,messageId});
+    return matched.id;
+  }
+
+  const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const title = `Possible ${intent.issueType} issue: ${body.replace(/\s+/g, ' ').slice(0, 130)}`;
+  const ts = Date.now();
+  const result = d.prepare(
+    `INSERT OR IGNORE INTO issues
+      (id, workspace_id, title, description, severity, status, source, created_by,
+       reporter_id, requires_approval, approved, evidence, issue_type, created_at, entity_key, last_activity_at)
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, 'auto-warning-detector', ?, ?, 0, ?, ?, ?, ?, ?)`
+  ).run(issueId, workspaceId, title.slice(0, 200), body, intent.severity,
+    messageId, senderId, intent.issueType === 'safety' ? 1 : 0,
+    'Unverified report from chat message; human inspection/confirmation required.',
+    intent.issueType, ts, entityKey, ts);
+
+  if (!result.changes) return d.prepare('SELECT id FROM issues WHERE workspace_id = ? AND source = ?')
+    .get(workspaceId, messageId)?.id || null;
+  const originalLink = linkMessageToIssue(d, {
+    workspaceId, issueId, messageId, relation: 'report', actor: 'fast-warning',
+    reason: 'Original source for unverified warning',
+  });
+  if (!originalLink.ok) throw new Error(originalLink.error);
+
+  d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(`al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      workspaceId, 'issue_auto_reported', 'issue', issueId, 'warning-detector',
+      `Unverified warning from message ${messageId}, sent by ${senderId}; requires human review`, ts);
+  bumpRevision();
+  notifySSE(workspaceId, { type: 'issue', action: 'reported', id: issueId, messageId });
+  return issueId;
+}
+
+/** Retrieve one source message for verified MCP issue reporting. */
+app.get('/api/workspaces/:workspace/messages/:messageId', validateWorkspace, (req, res) => {
+  const row = getDB().prepare('SELECT * FROM messages WHERE workspace_id = ? AND id = ?')
+    .get(req.workspaceId, req.params.messageId);
+  if (!row) return res.status(404).json({ error: 'Message not found in workspace' });
+  res.json(mapMessage(row));
 });
 
 /** POST /api/workspaces/:workspace/messages — create a message (idempotent by client ID). */
@@ -313,14 +379,49 @@ app.post('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) =>
     bumpRevision();
     notifySSE(req.workspaceId, { type: 'message', id: msgId, user, body: text.slice(0, 1500), at: ts });
 
-    // ── AI Processing: fire async (non-blocking) ───────────────────
-    // The response is sent immediately — chat is never blocked.
-    // dispatchProcessMessage selects tencent-agent or groq-agent
-    // based on AI_PROVIDER env var (default: tencent-local).
-    // The agent fetches context, triggers the AI, executes actions
-    // via MCP tools (Tencent) or JSON API (Groq), and SSE pushes
-    // updates to all clients when done.
-    setImmediate(() => {
+    // Route obvious fault reports in milliseconds; avoid launching the full
+    // CodeBuddy CLI for simple warnings and low-value acknowledgments.
+    // Other language (including questions/ambiguous problems) goes to AI.
+    const intent = classifyIncomingMessage(text.slice(0, 1500));
+    if (intent.route === 'issue') {
+      try {
+        const issueId = recordAutoWarning(req.workspaceId, msgId, user, text.slice(0, 1500), intent);
+        if (issueId) console.log(`[fast-warning] Reported unverified issue ${issueId} from ${msgId}`);
+      } catch (err) {
+        // Never lose the chat message due to warning classification failures.
+        console.error('[fast-warning] Failed to record warning:', err.message);
+      }
+    }
+
+    // The chat response is immediate; complex tasks and ambiguous messages
+    // still receive Groq semantic analysis in a non-blocking callback.
+    // Very simple low-risk manager assignments can use the *existing*
+    // validated manager-task endpoint directly, without CodeBuddy startup.
+    // Server-side checks still enforce manager identity, member assignments,
+    // category permissions, and source-message idempotency.
+    if (intent.route === 'routine-task' && user === getWorkspaceManager(d, req.workspaceId)) {
+      setImmediate(() => {
+        fetch(`http://127.0.0.1:${PORT}/api/workspaces/${encodeURIComponent(req.workspaceId)}/manager-task`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceMessageId: msgId,
+            ...intent.task,
+            description: `Explicit manager assignment in message ${msgId}`,
+            createdBy: 'fast-routine',
+          }),
+        }).then(async response => {
+          if (!response.ok) throw new Error(`Direct task rejected (${response.status}): ${(await response.text()).slice(0, 200)}`);
+          const task = await response.json();
+          console.log(`[fast-task] Routine manager task ${task.id} created from ${msgId}`);
+        }).catch(err => {
+          console.error('[fast-task] Falling back to configured AI:', err.message);
+          dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
+            .catch(aiError => console.error('[fast-task] AI fallback failed:', aiError.message));
+        });
+      });
+    } else if (intent.route === 'ai' || intent.route === 'routine-task' ||
+               (intent.route === 'issue' && intent.needsAi)) setImmediate(() => {
       dispatchProcessMessage(req.workspaceId, msgId, user, text.slice(0, 1500))
         .then(result => {
           if (result.ok) {
@@ -478,13 +579,103 @@ app.put('/api/tasks/:id', (req, res) => {
   res.json(mapTask(updated));
 });
 
+// ── Agent V2: inspect and link ongoing incident conversations ──
+app.get('/api/workspaces/:workspace/incident-context', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const feedbackExamples = d.prepare(
+    'SELECT f.verdict, f.note, f.message_id AS messageId, m.body AS message, f.created_at AS reviewedAt ' +
+    'FROM ai_feedback f JOIN messages m ON m.id=f.message_id AND m.workspace_id=f.workspace_id ' +
+    'WHERE f.workspace_id=? ORDER BY f.created_at DESC LIMIT 8'
+  ).all(req.workspaceId).map(f => ({
+    ...f, message:String(f.message || '').slice(0, 200), note:String(f.note || '').slice(0, 160),
+  }));
+  res.json({
+    incidents: workspaceIncidentContext(d, req.workspaceId, 10),
+    feedbackExamples,
+    revision: currentRevision(),
+  });
+});
+
+app.post('/api/workspaces/:workspace/incidents/:issueId/link-message', validateWorkspace, (req, res) => {
+  const messageId = String(req.body.messageId || '').trim();
+  const reason = String(req.body.reason || '').trim().slice(0, 500);
+  const relation = String(req.body.relation || 'update');
+  if (!messageId || reason.length < 12) {
+    return res.status(400).json({ error: 'A real messageId and contextual reason (12+ characters) are required' });
+  }
+  const result = linkMessageToIssue(getDB(), {
+    workspaceId: req.workspaceId, issueId: req.params.issueId, messageId,
+    relation, reason, actor: 'silent-ai',
+  });
+  if (!result.ok) return res.status(result.status).json({ error: result.error });
+  if (!result.duplicate) {
+    bumpRevision();
+    notifySSE(req.workspaceId, {type:'issue',action:'linked',id:req.params.issueId,messageId});
+  }
+  res.status(result.duplicate ? 200 : 201).json(result);
+});
+
+// This is review data for regression tests and prompt iteration, not
+// automatic model training or authority to resolve a protected incident.
+const AI_FEEDBACK_VERDICTS = new Set(['correct_issue','false_alarm','wrong_link','correct_link','missed_context']);
+app.post('/api/workspaces/:workspace/agent-feedback', validateWorkspace, (req, res) => {
+  const d = getDB();
+  const reviewerId = String(req.body.reviewerId || '');
+  const verdict = String(req.body.verdict || '');
+  const issueId = String(req.body.issueId || '');
+  const messageId = String(req.body.messageId || '');
+  const note = String(req.body.note || '').trim().slice(0, 600);
+  if (reviewerId !== getWorkspaceManager(d, req.workspaceId)) {
+    return res.status(403).json({ error: 'Only the workspace demo manager can review AI detections' });
+  }
+  if (!AI_FEEDBACK_VERDICTS.has(verdict) || !issueId || !messageId) {
+    return res.status(400).json({ error: 'Valid verdict, issueId and messageId required' });
+  }
+  const linked = d.prepare('SELECT 1 FROM issue_message_links WHERE workspace_id=? AND issue_id=? AND message_id=?')
+    .get(req.workspaceId, issueId, messageId);
+  if (!linked) return res.status(404).json({ error: 'Feedback must reference a real linked incident message' });
+  if (verdict === 'wrong_link') {
+    const issue = d.prepare('SELECT source FROM issues WHERE id=? AND workspace_id=?')
+      .get(issueId,req.workspaceId);
+    if (issue?.source === messageId) {
+      return res.status(400).json({error:'Original report must be reviewed as a false alarm, not detached as a follow-up'});
+    }
+  }
+  const ts = Date.now();
+  const id = 'fb_' + ts.toString(36) + '_' + Math.random().toString(36).slice(2,8);
+  d.prepare('INSERT INTO ai_feedback (id,workspace_id,issue_id,message_id,verdict,note,reviewer_id,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run(id,req.workspaceId,issueId,messageId,verdict,note,reviewerId,ts);
+  if (verdict === 'wrong_link') {
+    // Keep the historical record visible but do not feed a disputed link
+    // back into Tencent as credible incident evidence.
+    d.prepare("UPDATE issue_message_links SET relation='disputed' WHERE workspace_id=? AND issue_id=? AND message_id=?")
+      .run(req.workspaceId,issueId,messageId);
+  }
+  d.prepare('INSERT INTO audit_log (id,workspace_id,action,entity_type,entity_id,actor,details,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .run('al_'+ts.toString(36)+'_'+Math.random().toString(36).slice(2,8),
+      req.workspaceId,'ai_feedback_recorded','issue',issueId,reviewerId,verdict+' for message '+messageId,ts);
+  bumpRevision();
+  notifySSE(req.workspaceId,{type:'feedback',id,issueId});
+  res.status(201).json({id,workspaceId:req.workspaceId,issueId,messageId,verdict,note,reviewerId,createdAt:ts});
+});
+
+app.get('/api/workspaces/:workspace/agent-feedback', validateWorkspace, (req, res) => {
+  const d = getDB();
+  if (String(req.query.reviewerId || '') !== getWorkspaceManager(d,req.workspaceId)) {
+    return res.status(403).json({error:'Only workspace demo manager can view feedback'});
+  }
+  const rows = d.prepare('SELECT id,workspace_id AS workspaceId,issue_id AS issueId,message_id AS messageId,verdict,note,reviewer_id AS reviewerId,created_at AS createdAt FROM ai_feedback WHERE workspace_id=? ORDER BY created_at DESC LIMIT 200')
+    .all(req.workspaceId);
+  res.json({feedback:rows,revision:currentRevision()});
+});
+
 // ── Issues ──────────────────────────────────────────────────────────
 
 /** GET /api/workspaces/:workspace/issues — list issues. */
 app.get('/api/workspaces/:workspace/issues', validateWorkspace, (req, res) => {
   const d = getDB();
   const rows = d.prepare('SELECT * FROM issues WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId);
-  res.json({ issues: rows.map(mapIssue), revision: currentRevision() });
+  res.json({ issues: rows.map(row => ({...mapIssue(row), linkedMessages: issueMessages(d, req.workspaceId, row.id, 12)})), revision: currentRevision() });
 });
 
 /** GET /api/issues/:id — get a single issue. */
@@ -492,7 +683,7 @@ app.get('/api/issues/:id', (req, res) => {
   const d = getDB();
   const row = d.prepare('SELECT * FROM issues WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'issue not found' });
-  res.json(mapIssue(row));
+  res.json({...mapIssue(row), linkedMessages: issueMessages(d, row.workspace_id, row.id, 30)});
 });
 
 /** PUT /api/issues/:id — update an issue (status, evidence, approved). */
@@ -513,7 +704,9 @@ app.put('/api/issues/:id', (req, res) => {
   if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no updatable fields' });
 
   const ts = Date.now();
-  if (updates.status === 'resolved') updates.resolved_at = ts;
+  if (updates.status === 'resolved') {
+    return res.status(403).json({error:'Issue resolution requires qualified-verifier route'});
+  }
 
   const setClauses = Object.keys(updates).map((k) => `${k} = @${k}`).join(', ');
   updates.id = id;
@@ -1230,11 +1423,11 @@ app.post('/api/workspaces/:workspace/ai-log', validateWorkspace, (req, res) => {
 
 // ── AI Integration Endpoints ─────────────────────────────────────────
 //
-// Tencent AI (default provider):
+// Tencent AI (legacy opt-in provider):
 //   GET  /api/workspaces/:workspace/tencent-status — Tencent agent status
 //   POST /api/tencent/retry-pending                — Recovery: retry pending jobs
 //
-// Legacy Groq AI (backward compat, disabled when AI_PROVIDER=tencent-local):
+// Groq AI (default Agent V2 provider):
 //   GET  /api/workspaces/:workspace/groq-status    — Groq agent status
 //   POST /api/groq/retry-pending                   — Recovery: retry pending jobs
 
@@ -1361,12 +1554,12 @@ app.post('/api/tencent/jobs/:jobId/complete', (req, res) => {
   res.json({ ok: true, jobId, status: 'completed', actions: actions || [] });
 });
 
-/** GET /api/workspaces/:workspace/groq-status — Legacy Groq agent monitoring. */
+/** GET /api/workspaces/:workspace/groq-status — active Groq agent monitoring. */
 app.get('/api/workspaces/:workspace/groq-status', validateWorkspace, (req, res) => {
   res.json(getGroqStatus(req.workspaceId));
 });
 
-/** POST /api/groq/retry-pending — legacy recovery endpoint (kept for backward compat). */
+/** POST /api/groq/retry-pending — recover queued Groq jobs. */
 app.post('/api/groq/retry-pending', async (_req, res) => {
   const result = await dispatchProcessPending();
   res.json(result);
@@ -1716,7 +1909,7 @@ app.post('/api/workspaces/:workspace/manager-task', validateWorkspace, (req, res
  */
 app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res) => {
   const d = getDB();
-  const { messageId, reporterId, title = '', issueType = 'general' } = req.body;
+  const { messageId, reporterId, title = '', issueType = 'general', detectedByAi = false } = req.body;
 
   if (!messageId) return res.status(400).json({ error: 'messageId is required' });
   if (!reporterId) return res.status(400).json({ error: 'reporterId is required' });
@@ -1728,6 +1921,15 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
   // Verify the reporter is a workspace member.
   if (!isWorkspaceMember(d, req.workspaceId, reporterId)) {
     return res.status(403).json({ error: 'Reporter is not a member of this workspace' });
+  }
+
+  // AI-reported incidents must be tied to the actual author of the message.
+  // This cannot prove the incident is true; it only verifies attribution.
+  if (detectedByAi && reporterId !== msg.user_id) {
+    return res.status(403).json({ error: 'AI report must attribute the source message to its actual author' });
+  }
+  if (detectedByAi && !['equipment', 'inventory', 'safety', 'general'].includes(issueType)) {
+    return res.status(400).json({ error: 'Invalid AI issue type' });
   }
 
   // Idempotency: check for existing issue with same (workspace, source).
@@ -1743,23 +1945,58 @@ app.post('/api/workspaces/:workspace/report-issue', validateWorkspace, (req, res
     });
   }
 
+  // Merge explicitly identified equipment reports with the same unresolved
+  // incident. Do NOT infer links from words like "it" or generic "machine".
+  const entityKey = normalizeEntityKey(msg.body);
+  const matched = findMatchingOpenIssue(d, req.workspaceId, entityKey);
+  if (matched) {
+    const link = linkMessageToIssue(d, {
+      workspaceId:req.workspaceId, issueId:matched.id, messageId, relation:'report',
+      actor:detectedByAi ? 'silent-ai' : reporterId,
+      reason:'Existing active incident with exact matching equipment identifier',
+    });
+    if (!link.ok) return res.status(link.status).json({error:link.error});
+    if (issueType === 'safety') {
+      d.prepare("UPDATE issues SET severity='high',requires_approval=1,issue_type='safety' WHERE id=? AND workspace_id=?")
+        .run(matched.id,req.workspaceId);
+    }
+    bumpRevision();
+    notifySSE(req.workspaceId,{type:'issue',action:'linked',id:matched.id,messageId});
+    const row = d.prepare('SELECT * FROM issues WHERE id=?').get(matched.id);
+    return res.status(200).json({...mapIssue(row),linked:true,duplicate:false});
+  }
+
   // Create the issue.
   const issueId = `i_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = Date.now();
   const issueTitle = title.trim() || `Reported issue from ${msg.user_id}'s message`;
 
   d.prepare(
-    `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at)
-     VALUES (?, ?, ?, ?, 'normal', 'reported', ?, ?, ?, 0, 0, ?, ?, ?)`,
+    `INSERT INTO issues (id, workspace_id, title, description, severity, status, source, created_by, reporter_id, requires_approval, approved, evidence, issue_type, created_at, entity_key, last_activity_at)
+     VALUES (?, ?, ?, ?, ?, 'reported', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
   ).run(issueId, req.workspaceId, issueTitle.slice(0, 200),
-    msg.body, messageId, reporterId, reporterId,
-    `Source message: "${msg.body.slice(0, 200)}"`, issueType, ts);
+    msg.body, detectedByAi && issueType === 'safety' ? 'high' : 'normal',
+    messageId, detectedByAi ? 'silent-ai' : reporterId, reporterId,
+    detectedByAi && issueType === 'safety' ? 1 : 0,
+    detectedByAi
+      ? `Unverified AI-detected claim in message ${messageId}; requires human confirmation.`
+      : `Source message: "${msg.body.slice(0, 200)}"`,
+    issueType, ts, entityKey, ts);
+
+  const link = linkMessageToIssue(d, {
+    workspaceId:req.workspaceId,issueId,messageId,relation:'report',
+    actor:detectedByAi ? 'silent-ai' : reporterId,reason:'Original source message for incident',
+  });
+  if (!link.ok) throw new Error(link.error);
 
   // Audit entry.
   d.prepare('INSERT INTO audit_log (id, workspace_id, action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
     `al_${ts.toString(36)}_${Math.random().toString(36).slice(2, 6)}`, req.workspaceId,
-    'issue_reported', 'issue', issueId, reporterId,
-    `Employee ${reporterId} flagged message ${messageId} as an issue: "${msg.body.slice(0, 150)}"`,
+    detectedByAi ? 'issue_ai_reported' : 'issue_reported', 'issue', issueId,
+    detectedByAi ? 'silent-ai' : reporterId,
+    detectedByAi
+      ? `AI identified possible problem in message ${messageId}; source author ${reporterId}; needs verification`
+      : `Employee ${reporterId} flagged message ${messageId} as an issue: "${msg.body.slice(0, 150)}"`,
     ts,
   );
 
@@ -2107,6 +2344,9 @@ app.post('/api/reset', (_req, res) => {
     DELETE FROM announcement_acknowledgments;
     DELETE FROM announcement_revisions;
     DELETE FROM announcements;
+    DELETE FROM ai_feedback;
+    DELETE FROM issue_message_links;
+    DELETE FROM ai_jobs;
     DELETE FROM ai_analysis_log;
     DELETE FROM completion_claims;
     DELETE FROM ai_proposals;
@@ -2216,7 +2456,7 @@ const server = app.listen(PORT, HOST, () => {
   } catch { /* ignore */ }
   console.log(`\n  API:       http://${HOST}:${PORT}/api/workspaces`);
   console.log(`  SSE:       http://${HOST}:${PORT}/api/events?workspace=daily`);
-  console.log(`  AI:        provider=${AI_PROVIDER}, poll=30s${AI_PROVIDER === 'tencent-local' ? ', CodeBuddy serve=' + (process.env.CODEBUDDY_SERVE_URL || 'http://127.0.0.1:8080') : ''}`);
+  console.log(`  AI:        provider=${AI_PROVIDER}, poll=30s${AI_PROVIDER === 'groq' ? ', model=' + (process.env.GROQ_MODEL || 'openai/gpt-oss-120b') : ', CodeBuddy opt-in'}`);
   console.log('');
 });
 
