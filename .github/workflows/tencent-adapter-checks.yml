@@ -1,0 +1,32 @@
+name: Tencent adapter checks
+
+on:
+  push:
+    branches:
+      - fix/tencent-agent-reliability-20261011
+  pull_request:
+    paths:
+      - server/tencent-agent.js
+      - server/mcp-server.js
+      - server/index.js
+      - server/test-tencent.js
+      - package.json
+      - package-lock.json
+      - .github/workflows/tencent-adapter-checks.yml
+
+permissions:
+  contents: read
+
+jobs:
+  safe-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:tencent

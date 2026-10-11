@@ -518,19 +518,23 @@ async function propose_chat_completion(args) {
       claimType,
     });
 
-    // Build a summary for the AI.
+    // Only an explicit completion can change task status. Progress and
+    // ambiguous messages are recorded without marking a task done.
     const protected_ = result.protectedTask ? ' [PROTECTED]' : '';
-    const summary = result.protectedTask
-      ? `Chat completion claim processed. Task "${result.task?.name}" moved to REVIEW — qualified verification required.${protected_}\n` +
-        `  Claim ID: ${result.claim?.id}\n` +
-        `  Verification applied: ${result.verificationApplied}\n` +
-        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
-        `  CRITICAL: This is an employee self-attestation, NOT independent proof. Qualified human verification required.`
-      : `Chat completion claim processed. Task "${result.task?.name}" marked DONE (self-attestation).${protected_}\n` +
-        `  Claim ID: ${result.claim?.id}\n` +
-        `  Verification applied: ${result.verificationApplied}\n` +
-        `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
-        `  NOTE: This is a self-reported claim, NOT independent proof of completion.`;
+    const summary = claimType !== 'completion'
+      ? `Chat ${claimType} claim recorded for "${result.task?.name}". Task remains ${result.finalTaskStatus}; no completion asserted.\n` +
+        `  Claim ID: ${result.claim?.id}\n  Source message: ${messageId}`
+      : result.protectedTask
+        ? `Chat completion claim processed. Task "${result.task?.name}" moved to REVIEW — qualified verification required.${protected_}\n` +
+          `  Claim ID: ${result.claim?.id}\n` +
+          `  Verification applied: ${result.verificationApplied}\n` +
+          `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+          `  CRITICAL: This is an employee self-attestation, NOT independent proof. Qualified human verification required.`
+        : `Chat completion claim processed. Task "${result.task?.name}" marked DONE (self-attestation).${protected_}\n` +
+          `  Claim ID: ${result.claim?.id}\n` +
+          `  Verification applied: ${result.verificationApplied}\n` +
+          `  Source message: ${messageId} (${result.sourceMessage?.user}: "${result.sourceMessage?.body}")\n` +
+          `  NOTE: This is a self-reported claim, NOT independent proof of completion.`;
 
     return {
       message: result.message,
@@ -594,17 +598,20 @@ async function create_manager_task(args) {
       createdBy: 'ai-agent',
     });
 
-    const summary = result.duplicate
-      ? `Task already exists for this message. No duplicate created.\n  Task: "${result.task?.name}" — assigned to ${result.task?.assignee}\n  Source message: ${messageId}`
-      : `Manager task created successfully — no approval needed.\n  Task: "${result.task?.name}" (ID: ${result.task?.id})\n  Assigned to: ${result.task?.assignee}\n  Category: ${result.task?.category}\n  Due: ${result.task?.due}\n  Source message: ${messageId}\n  The task is immediately visible to the assignee.`;
+    // The REST endpoint returns a flattened task, not { task: {...} }.
+    const task = result.task || result;
+    const duplicate = Boolean(result.duplicate);
+    const summary = duplicate
+      ? `Task already exists for this message. No duplicate created.\n  Task: "${task.name}" — assigned to ${task.assignee}\n  Source message: ${messageId}`
+      : `Manager task created successfully — no approval needed.\n  Task: "${task.name}" (ID: ${task.id})\n  Assigned to: ${task.assignee}\n  Category: ${task.category}\n  Due: ${task.due}\n  Source message: ${messageId}\n  The task is immediately visible to the assignee.`;
 
     return {
-      message: result.duplicate
+      message: duplicate
         ? 'Task already exists for this source message. No duplicate created.'
         : 'Manager task created successfully. The task is immediately visible to the assignee — no review cycle.',
       summary,
-      task: result.task,
-      duplicate: result.duplicate || false,
+      task,
+      duplicate,
       sourceMessage: result.sourceMessage,
     };
   } catch (err) {
@@ -809,8 +816,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   try {
     const result = await handler(args || {});
+    // Handlers return {error: ...} for expected policy or validation failures.
+    // They must still be signalled as MCP errors, not successful tool calls.
+    const failed = Boolean(result && typeof result === 'object' && result.error);
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      isError: failed,
     };
   } catch (err) {
     return {
