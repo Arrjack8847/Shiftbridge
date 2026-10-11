@@ -271,7 +271,7 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   const d = getDB();
   const since = req.query.since ? parseInt(req.query.since, 10) : 0;
   const sinceSeq = req.query.sinceSeq ? parseInt(req.query.sinceSeq, 10) : 0;
-  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  const limit = Math.max(1, Math.min(parseInt(req.query.limit, 10) || 100, 500));
 
   // latest=1 returns the newest batch in chronological order.
   // Existing since/sinceSeq pagination remains backward compatible.
@@ -283,7 +283,8 @@ app.get('/api/workspaces/:workspace/messages', validateWorkspace, (req, res) => 
   const selected = rows.slice(0, limit);
   if (latest) selected.reverse();
   const messages = selected.map(mapMessage);
-  const nextSinceSeq = hasMore && messages.length > 0
+  // sinceSeq pages forward; it cannot page backwards into a "latest" slice.
+  const nextSinceSeq = !latest && hasMore && messages.length > 0
     ? messages[messages.length - 1].seq
     : null;
 
