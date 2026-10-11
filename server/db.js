@@ -147,11 +147,12 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_audit_ws ON audit_log(workspace_id, created_at);
 
     CREATE TABLE IF NOT EXISTS shifts (
-      workspace_id  TEXT PRIMARY KEY,
-      person_id    TEXT NOT NULL,
-      clocked_in   INTEGER NOT NULL DEFAULT 0,
-      since         INTEGER,
-      FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      workspace_id TEXT NOT NULL,
+      person_id TEXT NOT NULL,
+      clocked_in INTEGER NOT NULL DEFAULT 0,
+      since INTEGER,
+      PRIMARY KEY (workspace_id, person_id),
+      FOREIGN KEY (workspace_id, person_id) REFERENCES workspace_members(workspace_id, person_id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS handovers (
@@ -449,6 +450,75 @@ export function initSchema() {
         FROM issues i JOIN messages m
           ON m.id=i.source AND m.workspace_id=i.workspace_id
        WHERE i.source IS NOT NULL;
+  `);
+
+
+  // Upgrade the former one-row-per-workspace shift table without losing records.
+  // This runs only for databases created before the per-person schema.
+  const shiftColumns = d.prepare('PRAGMA table_info(shifts)').all();
+  if (shiftColumns.find((col) => col.name === 'person_id')?.pk !== 2) {
+    d.transaction(() => {
+      d.exec(`
+        ALTER TABLE shifts RENAME TO shifts_legacy;
+        CREATE TABLE shifts (
+          workspace_id TEXT NOT NULL,
+          person_id TEXT NOT NULL,
+          clocked_in INTEGER NOT NULL DEFAULT 0,
+          since INTEGER,
+          PRIMARY KEY (workspace_id, person_id),
+          FOREIGN KEY (workspace_id, person_id) REFERENCES workspace_members(workspace_id, person_id) ON DELETE CASCADE
+        );
+        INSERT INTO shifts(workspace_id, person_id, clocked_in, since)
+          SELECT old.workspace_id, old.person_id, old.clocked_in, old.since
+          FROM shifts_legacy old
+          JOIN workspace_members m ON m.workspace_id = old.workspace_id AND m.person_id = old.person_id;
+        DROP TABLE shifts_legacy;
+      `);
+    })();
+  }
+
+  d.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_ws_id ON messages(workspace_id, id);
+    CREATE TABLE IF NOT EXISTS shift_sessions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      person_id TEXT NOT NULL,
+      clock_in_at INTEGER NOT NULL,
+      clock_out_at INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id, person_id) REFERENCES workspace_members(workspace_id, person_id) ON DELETE CASCADE,
+      CHECK (clock_out_at IS NULL OR clock_out_at >= clock_in_at)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_shift_one_open
+      ON shift_sessions(workspace_id, person_id) WHERE clock_out_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_shift_sessions_history
+      ON shift_sessions(workspace_id, person_id, clock_in_at DESC);
+
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      uploaded_by TEXT NOT NULL,
+      storage_bucket TEXT NOT NULL DEFAULT 'shiftbridge-chat',
+      storage_path TEXT NOT NULL UNIQUE,
+      original_name TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id, message_id) REFERENCES messages(workspace_id, id) ON DELETE CASCADE,
+      FOREIGN KEY (workspace_id, uploaded_by) REFERENCES workspace_members(workspace_id, person_id) ON DELETE CASCADE,
+      CHECK (size_bytes > 0)
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_message
+      ON message_attachments(workspace_id, message_id);
+    INSERT OR IGNORE INTO shift_sessions(id, workspace_id, person_id, clock_in_at, clock_out_at, created_at)
+      SELECT 'legacy:' || s.workspace_id || ':' || s.person_id,
+        s.workspace_id, s.person_id, s.since, NULL, s.since
+      FROM shifts s WHERE s.clocked_in = 1 AND s.since IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM shift_sessions x
+        WHERE x.workspace_id = s.workspace_id AND x.person_id = s.person_id AND x.clock_out_at IS NULL
+      );
   `);
 
   // Initialize revision counter if not present.
