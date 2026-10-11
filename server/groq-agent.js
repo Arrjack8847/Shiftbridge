@@ -145,100 +145,108 @@ function buildUserPrompt(messages, tasks, people, newMessage, incidents, feedbac
 }
 
 // ─── Execute an action via the ShiftBridge API ────────────────────
-async function executeAction(workspaceId, action, sourceMessageId) {
+const GROQ_TASK_CATEGORIES = new Set(['routine','inventory','cleaning','opening','repairs','purchases','safety']);
+const GROQ_PROTECTED_CATEGORIES = new Set(['repairs','purchases','safety']);
+const GROQ_ISSUE_TYPES = new Set(['equipment','inventory','safety','general']);
+const GROQ_ACTION_TYPES = new Set(['create_task','propose_task','completion_claim','report_issue','link_issue','no_action']);
+
+function protectedRequest(text) {
+  return /\\b(?:repair|fix|replace|maintenance|technician|qualified|inspection|inspect|safety|unsafe|hazard|sparking|electric(?:al)?|gas\\s+leak|fire|purchase|buy|spend|payment|refund|pay\\s+for)\\b/i.test(String(text||''));
+}
+function safeText(value,limit=100) { return String(value||'').trim().slice(0,limit); }
+
+async function executeAction(workspaceId, action, source) {
+  const db = getDB();
+  const sourceMessageId = source.id;
+  const senderId = source.user_id;
+  const member = db.prepare('SELECT role FROM workspace_members WHERE workspace_id=? AND person_id=?')
+    .get(workspaceId,senderId);
+  if (!member) return {type:action.type,ok:false,error:'Source sender is not a workspace member'};
+
   try {
     let result;
-
     switch (action.type) {
+      case 'create_task':
       case 'propose_task': {
-        // Create a manager task if the message is from the manager,
-        // otherwise create an AI proposal for manager review.
-        result = await apiPost(`/workspaces/${workspaceId}/manager-task`, {
-          sourceMessageId,
-          name: action.name,
-          description: action.description || '',
-          assignee: action.assignee || null,
-          priority: action.priority || 'normal',
-          category: action.category || 'routine',
-          due: action.due || 'Today',
-          reasoning: action.reasoning || '',
-          createdBy: 'groq-ai',
-        });
-
-        // If manager-task fails (e.g., not from manager), fall back to proposal
-        if (!result.ok && result.json?.error?.includes('not authored by the workspace manager')) {
-          result = await apiPost(`/workspaces/${workspaceId}/proposals`, {
-            type: 'task_proposal',
-            summary: action.name,
-            evidence: [action.description || ''],
-            reasoning: action.reasoning || '',
-            confidence: action.confidence || 'medium',
-            proposedData: {
-              name: action.name,
-              description: action.description || '',
-              assignee: action.assignee || null,
-              priority: action.priority || 'normal',
-              category: action.category || 'routine',
-              due: action.due || 'Today',
-            },
-            sourceMessageId,
+        const name = safeText(action.name,100);
+        const assignee = safeText(action.assignee,80).toLowerCase();
+        const category = GROQ_TASK_CATEGORIES.has(action.category) ? action.category : 'routine';
+        const description = safeText(action.description,800);
+        if (!name || !assignee) throw new Error('Task requires name and a named workspace assignee');
+        if (!db.prepare('SELECT 1 FROM workspace_members WHERE workspace_id=? AND person_id=?')
+          .get(workspaceId,assignee)) throw new Error('Task assignee is not a workspace member');
+        const sensitive = GROQ_PROTECTED_CATEGORIES.has(category) || protectedRequest(source.body) ||
+          protectedRequest(name + ' ' + description);
+        const fields = {
+          name,description,assignee,category:sensitive && !GROQ_PROTECTED_CATEGORIES.has(category)
+            ? (/\\b(?:purchase|buy|spend|payment|refund)\\b/i.test(source.body)?'purchases':'repairs')
+            : category,
+          due:safeText(action.due||'Today',50),
+          priority:['low','normal','high'].includes(action.priority)?action.priority:'normal',
+        };
+        if (action.type === 'create_task' && member.role === 'admin' && !sensitive) {
+          result = await apiPost('/workspaces/'+encodeURIComponent(workspaceId)+'/manager-task', {
+            sourceMessageId,...fields,reasoning:safeText(action.reasoning,500),createdBy:'groq-agent-v2',
+          });
+        } else {
+          result = await apiPost('/workspaces/'+encodeURIComponent(workspaceId)+'/proposals',{
+            type:'task_proposal',sourceMessageId,summary:name,evidence:[source.body],
+            reasoning:safeText(action.reasoning,800),confidence:['high','medium','low'].includes(action.confidence)
+              ?action.confidence:'medium',proposedData:fields,
           });
         }
         break;
       }
-
-      case 'propose_completion': {
-        result = await apiPost(`/workspaces/${workspaceId}/chat-completion`, {
-          taskId: action.taskId,
-          messageId: action.messageId || sourceMessageId,
-          reportingEmployee: action.reportingEmployee,
-          claimType: action.claimType || 'completion',
+      case 'completion_claim': {
+        const taskId = safeText(action.taskId,100);
+        const task = db.prepare('SELECT id,assignee,status FROM tasks WHERE id=? AND workspace_id=?')
+          .get(taskId,workspaceId);
+        if (!task || task.assignee !== senderId) throw new Error('Completion claim requires an existing assigned task and its actual assignee');
+        if (task.status === 'done') return {type:action.type,ok:true,skipped:true,result:{message:'Task already done'}};
+        const claimType=['completion','progress','ambiguous'].includes(action.claimType)
+          ?action.claimType:'ambiguous';
+        result = await apiPost('/workspaces/'+encodeURIComponent(workspaceId)+'/chat-completion',{
+          taskId,messageId:sourceMessageId,reportingEmployee:senderId,claimType,
         });
         break;
       }
-
       case 'report_issue': {
-        result = await apiPost(`/workspaces/${workspaceId}/report-issue`, {
-          messageId: action.messageId || sourceMessageId,
-          reporterId: action.reporterId,
-          title: action.title || '',
-          issueType: action.issueType || 'general',
+        const linked = db.prepare('SELECT issue_id FROM issue_message_links WHERE workspace_id=? AND message_id=?')
+          .get(workspaceId,sourceMessageId);
+        if (linked) return {type:action.type,ok:true,skipped:true,result:{issueId:linked.issue_id,message:'Incident already linked'}};
+        result = await apiPost('/workspaces/'+encodeURIComponent(workspaceId)+'/report-issue',{
+          messageId:sourceMessageId,reporterId:senderId,
+          title:safeText(action.title||source.body,160),
+          issueType:GROQ_ISSUE_TYPES.has(action.issueType)?action.issueType:'general',
+          detectedByAi:true,
         });
         break;
       }
-
-      case 'draft_announcement': {
-        result = await apiPost(`/workspaces/${workspaceId}/announcements`, {
-          title: action.title,
-          body: action.body,
-          type: action.announcementType || 'notice',
-          status: 'draft',
-          createdBy: 'groq-ai',
+      case 'link_issue': {
+        const issueId = safeText(action.issueId,100);
+        const incident = db.prepare("SELECT id FROM issues WHERE workspace_id=? AND id=? AND status!='resolved'")
+          .get(workspaceId,issueId);
+        if (!incident) throw new Error('Incident not found or already resolved in this workspace');
+        const relation = ['report','update','evidence','completion_claim','inspection_scheduled'].includes(action.relation)
+          ?action.relation:'update';
+        const reason = safeText(action.reasoning,450);
+        if (reason.length < 12) throw new Error('Incident link requires evidence-grounded reasoning');
+        result = await apiPost('/workspaces/'+encodeURIComponent(workspaceId)+'/incidents/'+encodeURIComponent(issueId)+'/link-message',{
+          messageId:sourceMessageId,relation,reason,
         });
         break;
       }
-
       case 'no_action':
-        result = { ok: true, json: { message: 'No action needed' } };
-        break;
-
+        return {type:action.type,ok:true,skipped:true,result:{message:'No action needed'}};
       default:
-        result = { ok: false, json: { error: `Unknown action type: ${action.type}` } };
+        throw new Error('Unsupported Groq action: '+safeText(action.type,50));
     }
-
     return {
-      type: action.type,
-      ok: result.ok,
-      status: result.ok ? 'executed' : 'failed',
-      result: result.json,
+      type:action.type,ok:result.ok,status:result.ok?'executed':'failed',
+      result:result.json,error:result.ok?undefined:safeText(result.json?.error||'Action rejected',300),
     };
-  } catch (err) {
-    return {
-      type: action.type,
-      ok: false,
-      status: 'error',
-      error: err.message,
-    };
+  } catch(err) {
+    return {type:action.type,ok:false,status:'error',error:safeText(err.message,300)};
   }
 }
 
